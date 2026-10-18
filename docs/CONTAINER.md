@@ -21,7 +21,7 @@ Container Registry on every push to `main` and every `v*.*.*` tag, so you can
 skip the local **Build** section below:
 
 ```sh
-podman pull ghcr.io/m0rf30/rivulet-engine:latest   # or a tag, e.g. :v0.1.0
+podman pull ghcr.io/rivulet-kodi/rivulet-engine:latest   # or a tag, e.g. :v0.1.0
 ```
 
 Available tags: `latest` (default branch), semver (`vX.Y.Z` and `X.Y`), the
@@ -138,7 +138,7 @@ Portainer stacks or plain `docker compose up -d`.
 ```yaml
 services:
   rivulet-engine:
-    image: ghcr.io/m0rf30/rivulet-engine:latest   # pin a tag, e.g. :v0.8.3
+    image: ghcr.io/rivulet-kodi/rivulet-engine:latest   # pin a tag, e.g. :v0.8.3
     container_name: rivulet-engine
     restart: unless-stopped
     ports:
@@ -161,7 +161,7 @@ by design. Then point any Stremio client's **streaming server URL** at
 ```yaml
 services:
   rivulet-engine:
-    image: ghcr.io/m0rf30/rivulet-engine:latest   # pin a tag, e.g. :v0.8.3
+    image: ghcr.io/rivulet-kodi/rivulet-engine:latest   # pin a tag, e.g. :v0.8.3
     container_name: rivulet-engine
     restart: unless-stopped
     ports:
