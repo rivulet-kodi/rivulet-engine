@@ -154,7 +154,7 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 
 ## Runtime / Tooling Preferences
 
-- **Go versions:** `go.mod` directive is **1.27.2** (latest patch; `govulncheck` in CI scans the stdlib of exactly this version, so bump it when a Go point release fixes a reachable stdlib vuln); Docker build image is **`golang:1.27.2-alpine3.24`** (keep it on the same patch as `go.mod`). CI uses `go-version-file: go.mod`. Keep the go.mod directive build-compatible across the cross-compile matrix.
+- **Go versions:** `go.mod` directive is **1.27.3** (latest patch; `govulncheck` in CI scans the stdlib of exactly this version, so bump it when a Go point release fixes a reachable stdlib vuln); Docker build image is **`golang:1.27.3-alpine3.24`** (keep it on the same patch as `go.mod`). CI uses `go-version-file: go.mod`. Keep the go.mod directive build-compatible across the cross-compile matrix.
 - **`CGO_ENABLED=0`** everywhere — no native deps.
 - **golangci-lint v2** (`bodyclose, errcheck, errorlint, gosec, govet, ineffassign, misspell, revive, staticcheck, unconvert, unused, whitespace`). `gosec` excludes by-design rules (variable URLs/subprocess/file paths — this is a localhost media server). `_test.go` files skip `errcheck`/`gosec`/`bodyclose`/`unparam` but still face `gofmt`/`staticcheck`/`revive`.
 - **Runtime deps** for full functionality: `ffmpeg`/`ffprobe` (HLS/probe/subtitles), `yt-dlp` (`/yt`). Bundled in the container image.

@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------
 # The builder runs natively on the build host ($BUILDPLATFORM) and cross-compiles
 # to the requested target — pure-Go (CGO disabled), so no QEMU emulation needed.
-ARG GO_IMAGE=docker.io/library/golang:1.27.2-alpine3.24
+ARG GO_IMAGE=docker.io/library/golang:1.27.3-alpine3.24
 ARG ALPINE_IMAGE=docker.io/library/alpine:3.24
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 
