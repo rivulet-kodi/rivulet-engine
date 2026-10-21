@@ -772,8 +772,8 @@ func isTrustedProxy(ip net.IP) bool {
 
 // clientIP returns the effective client IP.
 // X-Forwarded-For is honoured only when the immediate peer (RemoteAddr) is a
-// loopback or private address — i.e., the request is arriving through a local
-// reverse proxy. Public clients cannot spoof XFF to bypass IP-ACL checks.
+// trusted proxy (loopback or a RIVULET_TRUSTED_PROXIES CIDR; see
+// isTrustedProxy). Other clients cannot spoof XFF to bypass IP-ACL checks.
 //
 // The chain is walked from the right (the hop appended by the nearest proxy)
 // and the first address that is not itself a trusted proxy is returned; the
