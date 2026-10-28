@@ -355,13 +355,6 @@ func randomRelayToken() string {
 	return hex.EncodeToString(b)
 }
 
-// resolve looks up the upstream URL for token, rejecting unknown or expired
-// tokens.
-func (r *mediaRelay) resolve(token string) (string, bool) {
-	upstream, _, ok := r.resolveEntry(token)
-	return upstream, ok
-}
-
 // resolveEntry is resolve that also returns the entry's self origin ("" for
 // a guarded entry).
 func (r *mediaRelay) resolveEntry(token string) (upstream, self string, ok bool) {

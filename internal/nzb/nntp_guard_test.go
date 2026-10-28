@@ -43,7 +43,7 @@ func TestDial_ControlBlocksLoopbackByDefault(t *testing.T) {
 	}()
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	_, err = Dial(ServerConfig{
+	_, err = dial(ServerConfig{
 		Host:    "127.0.0.1",
 		Port:    port,
 		Control: netguard.DialControl(true),
@@ -69,7 +69,7 @@ func TestDial_ControlAllowsLoopbackWhenOptedIn(t *testing.T) {
 	serveDial(t, ln, "200 Welcome", "205 Closing")
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	c, err := Dial(ServerConfig{
+	c, err := dial(ServerConfig{
 		Host:    "127.0.0.1",
 		Port:    port,
 		Control: netguard.DialControl(false),
@@ -92,7 +92,7 @@ func TestDial_NoControlReachesLoopback(t *testing.T) {
 	serveDial(t, ln, "200 Welcome", "205 Closing")
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	c, err := Dial(ServerConfig{Host: "127.0.0.1", Port: port})
+	c, err := dial(ServerConfig{Host: "127.0.0.1", Port: port})
 	if err != nil {
 		t.Fatalf("Dial with nil Control on loopback = %v, want success", err)
 	}

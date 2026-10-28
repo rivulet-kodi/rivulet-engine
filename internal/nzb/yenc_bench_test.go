@@ -69,7 +69,7 @@ func BenchmarkDecodeYenc(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 	b.ReportAllocs()
 	for b.Loop() {
-		if err := DecodeYenc(bytes.NewReader(enc), io.Discard); err != nil {
+		if err := decodeYencTo(bytes.NewReader(enc), io.Discard); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -84,7 +84,7 @@ func TestDecodeYenc_AllocsPerSegmentBounded(t *testing.T) {
 	enc := encodeYencPart(data, int64(len(data)), 1, 1, 1)
 
 	run := func() {
-		if err := DecodeYenc(bytes.NewReader(enc), io.Discard); err != nil {
+		if err := decodeYencTo(bytes.NewReader(enc), io.Discard); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -92,7 +92,7 @@ func TestDecodeYenc_AllocsPerSegmentBounded(t *testing.T) {
 
 	allocs := testing.AllocsPerRun(20, run)
 	if allocs > 16 {
-		t.Errorf("DecodeYenc allocs/op = %v, want <= 16", allocs)
+		t.Errorf("decodeYenc allocs/op = %v, want <= 16", allocs)
 	}
 	if allocs < 1 {
 		t.Errorf("allocs/op = %v: AllocsPerRun is not measuring the decode", allocs)
@@ -114,7 +114,7 @@ func TestDecodeYenc_AllocsPerSegmentBounded(t *testing.T) {
 		limit = 100 * 1024
 	}
 	if perOp > limit {
-		t.Errorf("DecodeYenc allocated %d B/op, want <= %d B (pooled buffers; was ~393 KiB)", perOp, limit)
+		t.Errorf("decodeYenc allocated %d B/op, want <= %d B (pooled buffers; was ~393 KiB)", perOp, limit)
 	}
 }
 
@@ -129,13 +129,13 @@ func TestDecodeYenc_PooledBuffersDoNotLeakAcrossCalls(t *testing.T) {
 	trunc := encodeYencPart(a, int64(len(a)), 1, 1, 1)
 	trunc = trunc[:len(trunc)-len("=yend size=5000 part=1 pcrc32=00000000\r\n")]
 	var junk bytes.Buffer
-	if err := DecodeYenc(bytes.NewReader(trunc), &junk); err == nil {
+	if err := decodeYencTo(bytes.NewReader(trunc), &junk); err == nil {
 		t.Fatal("truncated article must error")
 	}
 
 	for i := range 5 {
 		var out bytes.Buffer
-		if err := DecodeYenc(bytes.NewReader(encodeYencPart(b, int64(len(b)), 1, 1, 1)), &out); err != nil {
+		if err := decodeYencTo(bytes.NewReader(encodeYencPart(b, int64(len(b)), 1, 1, 1)), &out); err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}
 		if !bytes.Equal(out.Bytes(), b) {
@@ -147,7 +147,7 @@ func TestDecodeYenc_PooledBuffersDoNotLeakAcrossCalls(t *testing.T) {
 func TestEncodeYencPartRoundTrip(t *testing.T) {
 	data := pseudoRandom(10_000, 5)
 	var out bytes.Buffer
-	if err := DecodeYenc(strings.NewReader(string(encodeYencPart(data, 20_000, 5_001, 2, 2))), &out); err != nil {
+	if err := decodeYencTo(strings.NewReader(string(encodeYencPart(data, 20_000, 5_001, 2, 2))), &out); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(out.Bytes(), data) {

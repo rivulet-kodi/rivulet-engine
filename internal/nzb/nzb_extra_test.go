@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// ===== DecodeYenc additional cases ===========================================
+// ===== decodeYenc additional cases ===========================================
 
 func TestDecodeYenc_MultiLineBlock(t *testing.T) {
 	// yEnc body split across multiple encoded lines.
@@ -25,7 +25,7 @@ func TestDecodeYenc_MultiLineBlock(t *testing.T) {
 	sb.WriteString("=yend size=4\n")
 
 	var out bytes.Buffer
-	if err := DecodeYenc(strings.NewReader(sb.String()), &out); err != nil {
+	if err := decodeYencTo(strings.NewReader(sb.String()), &out); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if want := []byte{0, 1, 2, 3}; !bytes.Equal(out.Bytes(), want) {
@@ -37,8 +37,8 @@ func TestDecodeYenc_EscapeProducing0x00(t *testing.T) {
 	// Byte 214: (214+42) % 256 == 0 (NUL) — encoder must escape it.
 	data := []byte{214}
 	var out bytes.Buffer
-	if err := DecodeYenc(bytes.NewReader(buildYenc(data)), &out); err != nil {
-		t.Fatalf("DecodeYenc error: %v", err)
+	if err := decodeYencTo(bytes.NewReader(buildYenc(data)), &out); err != nil {
+		t.Fatalf("decodeYenc error: %v", err)
 	}
 	if !bytes.Equal(out.Bytes(), data) {
 		t.Errorf("got %#x, want %#x", out.Bytes(), data)
@@ -49,8 +49,8 @@ func TestDecodeYenc_EscapeProducing0x3D(t *testing.T) {
 	// Byte 19: (19+42) == 61 == 0x3D ('=') — encoder must escape it.
 	data := []byte{19}
 	var out bytes.Buffer
-	if err := DecodeYenc(bytes.NewReader(buildYenc(data)), &out); err != nil {
-		t.Fatalf("DecodeYenc error: %v", err)
+	if err := decodeYencTo(bytes.NewReader(buildYenc(data)), &out); err != nil {
+		t.Fatalf("decodeYenc error: %v", err)
 	}
 	if !bytes.Equal(out.Bytes(), data) {
 		t.Errorf("got %#x, want %#x", out.Bytes(), data)
@@ -61,7 +61,7 @@ func TestDecodeYenc_ByteWrapping(t *testing.T) {
 	// Bytes > 213 wrap mod 256 during encoding: (b+42) overflows uint8.
 	data := []byte{215, 240, 255}
 	var out bytes.Buffer
-	if err := DecodeYenc(bytes.NewReader(buildYenc(data)), &out); err != nil {
+	if err := decodeYencTo(bytes.NewReader(buildYenc(data)), &out); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !bytes.Equal(out.Bytes(), data) {
@@ -85,7 +85,7 @@ func TestDecodeYenc_GarbageMustNotPanic(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			_ = DecodeYenc(strings.NewReader(tc.input), &out)
+			_ = decodeYencTo(strings.NewReader(tc.input), &out)
 		})
 	}
 }
@@ -94,7 +94,7 @@ func TestDecodeYenc_EscapeAtEndOfLine(t *testing.T) {
 	// '=' at end of an encoded line is an incomplete escape — must return error.
 	input := "=ybegin line=128 size=1 name=t.bin\nabc=\n=yend\n"
 	var out bytes.Buffer
-	if err := DecodeYenc(strings.NewReader(input), &out); err == nil {
+	if err := decodeYencTo(strings.NewReader(input), &out); err == nil {
 		t.Error("expected error for escape character at end of line, got nil")
 	}
 }
@@ -108,7 +108,7 @@ func TestDecodeYenc_YpartSkipped(t *testing.T) {
 	sb.WriteString("=yend size=2\n")
 
 	var out bytes.Buffer
-	if err := DecodeYenc(strings.NewReader(sb.String()), &out); err != nil {
+	if err := decodeYencTo(strings.NewReader(sb.String()), &out); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if want := []byte{0, 1}; !bytes.Equal(out.Bytes(), want) {
@@ -239,82 +239,6 @@ func TestParse_ThreeFiles(t *testing.T) {
 		if files[i].Size != tc.size {
 			t.Errorf("files[%d].Size = %d, want %d", i, files[i].Size, tc.size)
 		}
-	}
-}
-
-// ===== limitedWriter tests ===================================================
-
-func TestLimitedWriter_ExactLimit(t *testing.T) {
-	var buf bytes.Buffer
-	lw := &limitedWriter{w: &buf, limit: 5}
-	n, err := lw.Write([]byte("hello"))
-	if err != nil {
-		t.Errorf("unexpected error writing exactly at limit: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("n = %d, want 5", n)
-	}
-	if buf.String() != "hello" {
-		t.Errorf("buf = %q, want %q", buf.String(), "hello")
-	}
-}
-
-func TestLimitedWriter_Overflow(t *testing.T) {
-	// Write exceeds limit: only bytes up to limit are written, then an error.
-	var buf bytes.Buffer
-	lw := &limitedWriter{w: &buf, limit: 3}
-	n, err := lw.Write([]byte("hello"))
-	if err == nil {
-		t.Fatal("expected overflow error, got nil")
-	}
-	if n != 3 {
-		t.Errorf("n = %d, want 3 (bytes written up to limit)", n)
-	}
-	if buf.String() != "hel" {
-		t.Errorf("buf = %q, want \"hel\"", buf.String())
-	}
-}
-
-func TestLimitedWriter_AlreadyFull(t *testing.T) {
-	// written == limit: next write must fail immediately with 0 bytes.
-	var buf bytes.Buffer
-	lw := &limitedWriter{w: &buf, limit: 3, written: 3}
-	n, err := lw.Write([]byte("x"))
-	if err == nil {
-		t.Fatal("expected error when already at limit")
-	}
-	if n != 0 {
-		t.Errorf("n = %d, want 0", n)
-	}
-}
-
-func TestLimitedWriter_ZeroLimitUnbounded(t *testing.T) {
-	// limit == 0 disables the cap entirely.
-	var buf bytes.Buffer
-	lw := &limitedWriter{w: &buf, limit: 0}
-	data := bytes.Repeat([]byte("x"), 10_000)
-	n, err := lw.Write(data)
-	if err != nil {
-		t.Errorf("unexpected error with zero limit: %v", err)
-	}
-	if n != 10_000 {
-		t.Errorf("n = %d, want 10000", n)
-	}
-}
-
-func TestLimitedWriter_MultipleWritesOverflow(t *testing.T) {
-	// First write succeeds; accumulated second write crosses the limit.
-	var buf bytes.Buffer
-	lw := &limitedWriter{w: &buf, limit: 5}
-
-	if _, err := lw.Write([]byte("abc")); err != nil {
-		t.Fatalf("first write unexpected error: %v", err)
-	}
-	if _, err := lw.Write([]byte("defgh")); err == nil {
-		t.Error("second write: expected overflow error, got nil")
-	}
-	if buf.Len() > 5 {
-		t.Errorf("buf.Len() = %d exceeds limit 5", buf.Len())
 	}
 }
 
@@ -543,7 +467,7 @@ func TestDial_PlainTextGreeting200(t *testing.T) {
 	serveDial(t, ln, "200 Welcome", "205 Closing")
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	c, err := Dial(ServerConfig{Host: "127.0.0.1", Port: port})
+	c, err := dial(ServerConfig{Host: "127.0.0.1", Port: port})
 	if err != nil {
 		t.Fatalf("Dial error: %v", err)
 	}
@@ -559,7 +483,7 @@ func TestDial_Greeting201(t *testing.T) {
 	serveDial(t, ln, "201 Read-only welcome", "205 Closing")
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	c, err := Dial(ServerConfig{Host: "127.0.0.1", Port: port})
+	c, err := dial(ServerConfig{Host: "127.0.0.1", Port: port})
 	if err != nil {
 		t.Fatalf("Dial error: %v", err)
 	}
@@ -575,7 +499,7 @@ func TestDial_UnexpectedGreeting(t *testing.T) {
 	serveDial(t, ln, "400 Service temporarily unavailable")
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	_, err = Dial(ServerConfig{Host: "127.0.0.1", Port: port})
+	_, err = dial(ServerConfig{Host: "127.0.0.1", Port: port})
 	if err == nil {
 		t.Error("expected error for unexpected greeting code 400, got nil")
 	}
@@ -595,7 +519,7 @@ func TestDial_WithAuth(t *testing.T) {
 	)
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	c, err := Dial(ServerConfig{Host: "127.0.0.1", Port: port, User: "u", Pass: "p"})
+	c, err := dial(ServerConfig{Host: "127.0.0.1", Port: port, User: "u", Pass: "p"})
 	if err != nil {
 		t.Fatalf("Dial with auth error: %v", err)
 	}
@@ -615,7 +539,7 @@ func TestDial_AuthAcceptedWithoutPassword(t *testing.T) {
 	)
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	c, err := Dial(ServerConfig{Host: "127.0.0.1", Port: port, User: "u", Pass: "p"})
+	c, err := dial(ServerConfig{Host: "127.0.0.1", Port: port, User: "u", Pass: "p"})
 	if err != nil {
 		t.Fatalf("Dial auth-without-password error: %v", err)
 	}
@@ -632,7 +556,7 @@ func TestDial_AuthFails(t *testing.T) {
 	serveDial(t, ln, "200 Welcome", "500 Error")
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	_, err = Dial(ServerConfig{Host: "127.0.0.1", Port: port, User: "u", Pass: "p"})
+	_, err = dial(ServerConfig{Host: "127.0.0.1", Port: port, User: "u", Pass: "p"})
 	if err == nil {
 		t.Error("expected error when authentication fails, got nil")
 	}
@@ -647,7 +571,7 @@ func TestDial_ConnectionRefused(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	_, err = Dial(ServerConfig{Host: "127.0.0.1", Port: port})
+	_, err = dial(ServerConfig{Host: "127.0.0.1", Port: port})
 	if err == nil {
 		t.Error("expected dial error for closed port, got nil")
 	}
@@ -665,66 +589,5 @@ func TestClient_Close(t *testing.T) {
 	}()
 	if err := c.Close(); err != nil {
 		t.Errorf("Close error: %v", err)
-	}
-}
-
-// TestSession_Close_ReleasesConnectionAndIsIdempotent guards the call-site
-// pattern in internal/api/nzb.go where a per-request Session is created for a
-// single AssembleFile call and then deferred-Closed: the underlying NNTP
-// connection must actually be torn down (QUIT sent, conn closed, client
-// cleared), and Close must remain safe to call again afterward — per
-// Session.Close's doc comment ("safe to call Close concurrently with or
-// after AssembleFile").
-func TestSession_Close_ReleasesConnectionAndIsIdempotent(t *testing.T) {
-	c, srv := makeClient(t)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		tp := textproto.NewConn(srv)
-		tp.ReadLine()                           //nolint:errcheck // QUIT
-		tp.PrintfLine("205 Closing connection") //nolint:errcheck
-		srv.Close()
-	}()
-
-	sess := &Session{cfg: ServerConfig{Host: "localhost"}, client: c}
-
-	if err := sess.Close(); err != nil {
-		t.Fatalf("first Close error: %v", err)
-	}
-	<-done
-	if sess.client != nil {
-		t.Error("Close() did not clear the persistent client reference")
-	}
-	// The deferred Close in the api/nzb.go call site may race with, or be
-	// followed by, another Close on the same Session; it must never error
-	// or panic once the connection is already released.
-	if err := sess.Close(); err != nil {
-		t.Errorf("second Close error: %v", err)
-	}
-}
-
-// ===== Session tests =========================================================
-
-func TestSession_Files(t *testing.T) {
-	files := []File{
-		{Name: "foo.mkv", Size: 100},
-		{Name: "bar.mkv", Size: 200},
-	}
-	sess := NewSession(ServerConfig{Host: "localhost"}, files)
-	got := sess.Files()
-	if len(got) != 2 || got[0].Name != "foo.mkv" || got[1].Name != "bar.mkv" {
-		t.Errorf("Files() = %v", got)
-	}
-}
-
-func TestSession_AssembleFile_NotFound(t *testing.T) {
-	// AssembleFile returns error before dialing when the named file is absent.
-	sess := NewSession(ServerConfig{Host: "localhost"}, []File{{Name: "exists.mkv"}})
-	err := sess.AssembleFile("missing.mkv", &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("expected error for missing file, got nil")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error %q should mention 'not found'", err)
 	}
 }
