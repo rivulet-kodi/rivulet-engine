@@ -203,7 +203,7 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
   Schemathesis dictionaries, so archive, NZB, DVR, HLS and local-files routes
   reach their success paths; casting, subtitle fetches and torrents are out of
   reach offline. Env knobs: `RIVULET_FUZZ_PASS` (`main`, `stateful` or `all`),
-  `RIVULET_FUZZ_SEED`, `RIVULET_FUZZ_EXAMPLES`, `RIVULET_FUZZ_REPORT_DIR`,
+  `RIVULET_FUZZ_SEED`, `RIVULET_FUZZ_EXAMPLES`, `RIVULET_FUZZ_REQUEST_TIMEOUT`, `RIVULET_FUZZ_REPORT_DIR`,
   `RIVULET_FUZZ_DOCKER` (docker or podman), `RIVULET_FUZZ_IMAGE` (prebuilt engine
   image), `RIVULET_FUZZ_URL` (fuzz a running server) with
   `SCHEMATHESIS='uvx schemathesis@4.32.5'` for a local CLI. A failure replays with

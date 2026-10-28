@@ -43,6 +43,7 @@
 # Environment:
 #   RIVULET_FUZZ_SEED         override the seed
 #   RIVULET_FUZZ_EXAMPLES     override --max-examples per operation
+#   RIVULET_FUZZ_REQUEST_TIMEOUT  per-request timeout in seconds (default: 40)
 #   RIVULET_FUZZ_PASS         main | stateful | all (default: all)
 #   RIVULET_FUZZ_REPORT_DIR   reports/cassettes/engine logs/fixtures (default: ./schemathesis-report)
 #   RIVULET_FUZZ_DOCKER       container CLI (default: docker, else podman)
@@ -224,6 +225,12 @@ fi
 
 status=0
 
+# Above the server's own longest bound (yt-dlp and ffprobe: 30 s), so a slow
+# no-egress failure surfaces as the server's 502/500 answer, not a client
+# timeout. On CI runners DNS on the internal network times out instead of
+# failing fast, which makes /yt take the full 30 s.
+request_timeout="${RIVULET_FUZZ_REQUEST_TIMEOUT:-40}"
+
 # run NAME CONFIG URL CHECKS [extra schemathesis args...]; keeps going after a
 # failing pass so one run reports every problem.
 run() {
@@ -235,7 +242,7 @@ run() {
 	# the fuzzer reaches the engine over the container network.
 	schemathesis --config-file "$fuzz/$config" run "$spec" --url "$target" \
 		--checks "$checks" --max-examples "$examples" --seed "$seed" \
-		--phases examples,coverage,fuzzing --workers 1 --request-timeout 20 \
+		--phases examples,coverage,fuzzing --workers 1 --request-timeout "$request_timeout" \
 		-H "Origin: https://web.stremio.com" \
 		--report junit,vcr --report-dir "$out/$name" --no-color "$@" || status=1
 }
