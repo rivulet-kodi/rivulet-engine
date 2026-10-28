@@ -101,15 +101,6 @@ type ytInfo struct {
 
 // handleYT dispatches /yt/:id and /yt/:id.json.
 // seg1 is the path segment after "yt" — may end in ".json".
-//
-// @Summary  Resolve a YouTube id via yt-dlp
-// @Tags     YouTube
-// @Param    id   path  string  true  "YouTube video id (optionally .json)"
-// @Success  307  {string}  string  "redirect"
-// @Success  200  {object}  map[string]interface{}  "format JSON for .json"
-// @Failure  400
-// @Failure  501
-// @Router   /yt/{id} [get]
 func (s *server) handleYT(w http.ResponseWriter, r *http.Request, seg1 string) {
 	wantJSON := strings.HasSuffix(seg1, ".json")
 	id := strings.TrimSuffix(seg1, ".json")

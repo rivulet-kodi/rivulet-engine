@@ -38,14 +38,6 @@ var (
 	buildDate    = ""
 )
 
-// @title        rivulet-engine enginefs API
-// @version      4.21.0
-// @description  HTTP API served by rivulet-engine, a pure-Go drop-in for Stremio's streaming server (server.js). serverVersion is reported as 4.21.0 for client feature-gating; it is independent of the binary build version.
-// @license.name MIT
-// @license.url  https://github.com/rivulet-kodi/rivulet-engine/blob/main/LICENSE
-// @host         127.0.0.1:11470
-// @BasePath     /
-// @schemes      http https
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {

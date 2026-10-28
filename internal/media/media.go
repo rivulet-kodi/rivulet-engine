@@ -643,6 +643,25 @@ func validateRemoteURL(raw, selfBase string) error {
 // (HLSConfig.PrivateAllow) pass even though they are private, matching the
 // relay's own dial-time check. A nil allow is exactly validateRemoteURL.
 func validateMediaURL(raw, selfBase string, allow *netguard.Allow) error {
+	if err := checkMediaURL(raw, selfBase, allow); err != nil {
+		return invalidMediaURLError{err}
+	}
+	return nil
+}
+
+// invalidMediaURLError marks a media URL the caller supplied as unusable
+// (malformed, wrong scheme, refused target, unresolvable host). It keeps the
+// underlying message and matches types.ErrInvalidMediaURL, which the API layer
+// maps to 400 instead of 500.
+type invalidMediaURLError struct{ err error }
+
+func (e invalidMediaURLError) Error() string { return e.err.Error() }
+func (e invalidMediaURLError) Unwrap() error { return e.err }
+func (e invalidMediaURLError) Is(target error) bool {
+	return target == types.ErrInvalidMediaURL
+}
+
+func checkMediaURL(raw, selfBase string, allow *netguard.Allow) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid URL %q: %w", raw, err)

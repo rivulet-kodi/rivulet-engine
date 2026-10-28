@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
+#
+# SPDX-License-Identifier: MIT
+
+# Black-box fuzzing of the HTTP API: Schemathesis generates requests from
+# internal/api/openapi.json against the container image of the checkout, run
+# on an internal (no egress) network. See scripts/api-fuzz.sh, tests/apifuzz/
+# and the "API fuzzing" section of AGENTS.md.
+#   pull requests   small fixed-seed budget (deterministic)
+#   nightly         bigger budget, random seed (printed; replay with the seed input)
+
+name: api-fuzz
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths-ignore: ["**/*.md", "docs/**", ".gitignore", "LICENSE"]
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Seed to replay (empty: a random one, printed in the log)"
+        required: false
+        default: ""
+
+concurrency:
+  group: api-fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  api-fuzz:
+    name: api-fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fuzz the API
+        env:
+          # pr: small fixed-seed budget; everything else: the nightly budget.
+          FUZZ_MODE: ${{ github.event_name == 'pull_request' && 'pr' || 'nightly' }}
+          RIVULET_FUZZ_SEED: ${{ inputs.seed }}
+          RIVULET_FUZZ_REPORT_DIR: ${{ runner.temp }}/schemathesis-report
+        run: scripts/api-fuzz.sh "$FUZZ_MODE"
+
+      # JUnit reports and cassettes (replay with `schemathesis replay`) plus the
+      # engine log.
+      - name: Upload the reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: api-fuzz-report
+          path: ${{ runner.temp }}/schemathesis-report
+          retention-days: 14
+          if-no-files-found: ignore

@@ -448,9 +448,22 @@ func TestHandlerStreamAlias_InvalidIH404(t *testing.T) {
 func TestHandlerCreateBlob_MissingBody(t *testing.T) {
 	h := newHandler(t)
 	rec := serve(t, h, http.MethodPost, "/create", nil)
-	// body is nil → missing from/blob → error 500
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d; want 500 (missing from/blob)", rec.Code)
+	// body is nil → missing from/blob → client error 400
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400 (missing from/blob)", rec.Code)
+	}
+}
+
+func TestHandlerCreateBlob_BadBlob400(t *testing.T) {
+	h := newHandler(t)
+	for name, body := range map[string]string{
+		"not hex":     `{"blob":"zz-not-hex"}`,
+		"not torrent": `{"blob":"00ff"}`,
+	} {
+		rec := serve(t, h, http.MethodPost, "/create", strings.NewReader(body))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d; want 400", name, rec.Code)
+		}
 	}
 }
 

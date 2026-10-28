@@ -60,7 +60,7 @@ ANDROID_LDFLAGS    := -linkmode=external -extldflags "-pie -lm -static-libstdc++
 # concern; a shared object is already position-independent code.
 ANDROID_LIB_LDFLAGS := -linkmode=external -extldflags "-lm -static-libstdc++"
 
-.PHONY: all build run test vet fmt fmt-check lint tidy clean smoke build-all lib-android swagger help
+.PHONY: all build run test vet fmt fmt-check lint tidy clean smoke build-all lib-android dup-baseline api-fuzz help
 
 all: fmt-check vet lint test build
 
@@ -95,8 +95,11 @@ lint: ## golangci-lint (if installed)
 tidy: ## go mod tidy
 	go mod tidy
 
-swagger: ## Regenerate the OpenAPI (Swagger 2.0) spec from code annotations (needs swaggo/swag)
-	swag init -g cmd/rivulet-engine/main.go -o docs --outputTypes yaml,json --parseInternal
+dup-baseline: ## Re-lock the dupl duplication baseline (.github/dup-baseline.json)
+	./scripts/dup-check.sh --update
+
+api-fuzz: ## Fuzz the HTTP API against internal/api/openapi.json with Schemathesis (needs docker/podman)
+	./scripts/api-fuzz.sh pr
 
 smoke: build ## Run the end-to-end API smoke test
 	./scripts/smoke.sh

@@ -25,5 +25,5 @@ Streaming flow: `EnsureEngine(ih)` adds the torrent, `Ready(ctx)` waits for meta
 | `internal/nzb` | NZB parser, yEnc decoder, NNTP client, segment assembler |
 | `internal/ftpstream` | FTP/FTPS + HTTP(S) byte-range stream opener |
 | `internal/logging` | structured slog logger (leveled, component-tagged, text/json) |
-| `docs/swagger.yaml` | OpenAPI/Swagger spec, generated from code (`make swagger`) |
+| `internal/api/openapi.json` | hand-maintained OpenAPI 3.1 spec (embedded; `GET /openapi.json`, Scalar reference at `/api/reference`) |
 | `scripts/smoke.sh` | end-to-end API smoke test |

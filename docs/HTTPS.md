@@ -186,4 +186,4 @@ browser web app at `web.stremio.com` will **not** trust this; use the
 - Env vars: `HTTPS_PORT`, `RIVULET_CERT_AUTHKEY`, `RIVULET_CERT_IP` — see the
   [configuration reference](CONFIGURATION.md).
 - Container/HuggingFace specifics: [CONTAINER.md](CONTAINER.md).
-- API reference: `GET /get-https` in the [swagger spec](swagger.yaml).
+- API reference: `GET /get-https` in the [OpenAPI spec](../internal/api/openapi.json).

@@ -692,7 +692,7 @@ func (m *hlsManager) StartHLS(id, mediaURL string, opts types.HLSSessionOptions)
 // itself keeps running for other waiters and still fills the probe cache.
 func (m *hlsManager) StartHLSContext(ctx context.Context, id, mediaURL string, opts types.HLSSessionOptions) (string, error) {
 	if mediaURL == "" {
-		return "", fmt.Errorf("hls: missing mediaURL")
+		return "", fmt.Errorf("hls: missing mediaURL: %w", types.ErrInvalidHLSOption)
 	}
 	// Validated once here, before mediaURL is ever stored on the session, so
 	// every later ffprobe/ffmpeg call on s.mediaURL (probeMedia, extractSubtitle,

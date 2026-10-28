@@ -322,22 +322,6 @@ func (s *server) handleNZB(w http.ResponseWriter, r *http.Request, seg []string)
 // nzbCreate handles POST /nzb/create[/{key}] and GET /nzb/create[/{key}]?lz=...
 //   - POST → resolve, store session, respond {"key":…}.
 //   - GET  → same, then 307-redirect to /nzb/stream/{key}.
-//
-// @Summary  Create an NZB/Usenet streaming session (POST, or GET with ?lz=)
-// @Tags     NZB
-// @Accept   json
-// @Produce  json
-// @Param    key   path   string  false  "caller-supplied session key"
-// @Param    lz    query  string  false  "lz-string encoded JSON body"
-// @Param    body  body   object  false  "{servers:[\"nntps://host\"], nzbUrl} (servers also accept {host,port,...} objects)"
-// @Success  200  {object}  map[string]string  "session key"
-// @Success  307  "redirect to /nzb/stream/{key} (GET form)"
-// @Failure  400
-// @Failure  501  "bare GET without ?lz="
-// @Router   /nzb/create [get]
-// @Router   /nzb/create [post]
-// @Router   /nzb/create/{key} [get]
-// @Router   /nzb/create/{key} [post]
 func (s *server) nzbCreate(w http.ResponseWriter, r *http.Request, key string) {
 	var req nzbCreateReq
 
@@ -705,17 +689,6 @@ func nzbServerFromURL(raw string) (nzbServerCfg, error) {
 }
 
 // nzbStream handles GET /nzb/stream?key={key} and /nzb/stream/{key}/{file...}.
-// @Summary  Stream an assembled file from an NZB session
-// @Tags     NZB
-// @Produce  application/octet-stream
-// @Param    key    query   string  false  "session key (query form)"
-// @Param    file   path    string  false  "file name within the NZB"
-// @Param    Range  header  string  false  "byte range (RFC 7233)"
-// @Success  200
-// @Success  206  {string}  string  "partial content"
-// @Failure  404
-// @Router   /nzb/stream [get]
-// @Router   /nzb/stream/{key}/{file} [get]
 func (s *server) nzbStream(w http.ResponseWriter, r *http.Request, seg []string) {
 	// Resolve key and optional filename from the URL.
 	var key, fileName string

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -748,7 +749,12 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	case "record":
 		s.handleRecord(w, r, strings.Split(path, "/"))
 	case "api":
+		if s.handleAPIReference(w, r, path) {
+			return
+		}
 		s.handleRecordings(w, r, strings.Split(path, "/"))
+	case "openapi.json":
+		s.handleOpenAPI(w, r)
 	// /list — active infohash array handled above (single-segment hot path)
 	// /stream/:infoHash/:fileIdx — alias to /:infoHash/:fileIdx
 	case "stream":
@@ -798,39 +804,19 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 
 // ---- inline-route handlers -----------------------------------------------
 
-// @Summary     Remove all active torrent engines
-// @Tags        Engine
-// @Produce     json
-// @Success     200  {object}  map[string]interface{}
-// @Router      /removeAll [get]
 func (s *server) handleRemoveAll(w http.ResponseWriter, _ *http.Request) {
 	s.em.RemoveAll()
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
-// @Summary     List available network interfaces
-// @Tags        System
-// @Produce     json
-// @Success     200  {object}  map[string]interface{}
-// @Router      /network-info [get]
 func (s *server) handleNetworkInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"availableInterfaces": availableInterfaces()})
 }
 
-// @Summary     Report available hardware acceleration devices
-// @Tags        System
-// @Produce     json
-// @Success     200  {object}  map[string]interface{}
-// @Router      /device-info [get]
 func (s *server) handleDeviceInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"availableHardwareAccelerations": detectHWAccels()})
 }
 
-// @Summary     Liveness probe
-// @Tags        System
-// @Produce     json
-// @Success     200  {object}  map[string]interface{}
-// @Router      /heartbeat [get]
 func (s *server) handleHeartbeat(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
@@ -841,12 +827,6 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, _ *http.Request) {
 // Origin: *), so any web page can read it. Intended for localhost-trust
 // scraping (e.g. a Prometheus instance on the same host); do not expose the
 // listener beyond loopback without a firewall in front.
-//
-// @Summary  Prometheus-format runtime and app gauges
-// @Tags     System
-// @Produce  text/plain
-// @Success  200  {string}  string  "Prometheus text exposition"
-// @Router   /metrics [get]
 func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
@@ -899,30 +879,14 @@ func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, b.String())
 }
 
-// @Summary     List available hardware acceleration profiles
-// @Tags        System
-// @Produce     json
-// @Success     200  {array}  string
-// @Router      /hwaccel-profiler [get]
 func (s *server) handleHwaccelProfiler(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, detectHWAccels())
 }
 
-// @Summary     List active info hashes
-// @Tags        Engine
-// @Produce     json
-// @Success     200  {array}  string
-// @Router      /list [get]
 func (s *server) handleList(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.em.ListEngines())
 }
 
-// @Summary     Remove a torrent engine by info hash
-// @Tags        Engine
-// @Produce     json
-// @Param       infoHash  path  string  true  "info hash"
-// @Success     200  {object}  map[string]interface{}
-// @Router      /{infoHash}/remove [get]
 func (s *server) handleRemove(w http.ResponseWriter, _ *http.Request, ih string) {
 	_ = s.em.RemoveEngine(ih)
 	writeJSON(w, http.StatusOK, map[string]any{})
@@ -930,16 +894,6 @@ func (s *server) handleRemove(w http.ResponseWriter, _ *http.Request, ih string)
 
 // ---- streaming ------------------------------------------------------------
 
-// @Summary  Stream a torrent file by info hash and file index
-// @Tags     Streaming
-// @Produce  application/octet-stream
-// @Param    infoHash  path    string  true   "40-hex info hash"
-// @Param    fileIdx   path    int     true   "file index"
-// @Param    Range     header  string  false  "byte range"
-// @Success  206  {string}  string  "partial content"
-// @Success  200
-// @Failure  416
-// @Router   /{infoHash}/{fileIdx} [get]
 func (s *server) handleStream(w http.ResponseWriter, r *http.Request, ih, idxSeg string) {
 	// Guard the query parse: skip url.Values map alloc on requests with no query string.
 	// url.Values.Get and nil map index are both nil-safe.
@@ -1185,14 +1139,6 @@ type createBody struct {
 	} `json:"peerSearch"`
 }
 
-// @Summary  Create or attach a torrent engine
-// @Tags     Engine
-// @Accept   json
-// @Produce  json
-// @Param    infoHash  path  string  true  "info hash"
-// @Success  200  {object}  types.Stats
-// @Router   /{infoHash}/create [get]
-// @Router   /{infoHash}/create [post]
 func (s *server) handleCreate(w http.ResponseWriter, r *http.Request, ih string) {
 	var body createBody
 	if r.Body != nil {
@@ -1244,14 +1190,6 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request, ih string)
 }
 
 // handleCreateBlob handles POST /create with {from:<url|path>} or {blob:<hex>}.
-//
-// @Summary  Create a torrent engine from URL or hex blob
-// @Tags     Engine
-// @Accept   json
-// @Produce  json
-// @Success  200  {object}  types.Stats
-// @Router   /create [get]
-// @Router   /create [post]
 func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		From string `json:"from"`
@@ -1262,6 +1200,9 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	var raw []byte
 	var err error
+	// errStatus is what a non-nil err maps to: a malformed request is the
+	// caller's fault (400), a failed fetch of the remote torrent is upstream's (502).
+	errStatus := http.StatusBadRequest
 	switch {
 	case body.Blob != "":
 		raw, err = hexDecode(body.Blob)
@@ -1270,6 +1211,7 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden target", http.StatusForbidden)
 			return
 		}
+		errStatus = http.StatusBadGateway
 		var blobResp *http.Response
 		blobResp, err = s.blobClient.Get(body.From)
 		if err == nil {
@@ -1287,12 +1229,12 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 		err = fmt.Errorf("missing from/blob")
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), errStatus)
 		return
 	}
 	mi, err := metainfo.Load(strings.NewReader(string(raw)))
 	if err != nil {
-		http.Error(w, "parse torrent: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "parse torrent: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	ih := mi.HashInfoBytes().HexString()
@@ -1310,13 +1252,6 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, eng.Stats(-1))
 }
 
-// @Summary  Get stats for a specific torrent engine file
-// @Tags     Stats
-// @Produce  json
-// @Param    infoHash  path  string  true  "info hash"
-// @Success  200  {object}  types.Stats
-// @Router   /{infoHash}/stats.json [get]
-// @Router   /{infoHash}/{fileIdx}/stats.json [get]
 func (s *server) writeStats(w http.ResponseWriter, ih string, idx int) {
 	eng, ok := s.em.GetEngine(ih)
 	if !ok {
@@ -1326,11 +1261,6 @@ func (s *server) writeStats(w http.ResponseWriter, ih string, idx int) {
 	writeJSON(w, http.StatusOK, eng.Stats(idx))
 }
 
-// @Summary  Get stats for all active torrent engines
-// @Tags     Stats
-// @Produce  json
-// @Success  200  {object}  map[string]types.Stats
-// @Router   /stats.json [get]
 func (s *server) handleAllStats(w http.ResponseWriter, r *http.Request) {
 	all := s.em.AllStats()
 	// Common path: avoid url.Values map alloc by checking RawQuery directly.
@@ -1352,13 +1282,6 @@ func (s *server) handleAllStats(w http.ResponseWriter, r *http.Request) {
 // handlePeers serves GET /:infoHash/peers — a JSON array of connected peers.
 // Peer data is sourced from Stats.Wires (already available on the types.Engine
 // interface) so we don't need to reach into the concrete engine internals.
-//
-// @Summary  List connected peers for a torrent engine
-// @Tags     Stats
-// @Produce  json
-// @Param    infoHash  path  string  true  "info hash"
-// @Success  200  {array}  object
-// @Router   /{infoHash}/peers [get]
 func (s *server) handlePeers(w http.ResponseWriter, r *http.Request, ih string) {
 	eng, ok := s.em.GetEngine(ih)
 	if !ok {
@@ -1395,12 +1318,6 @@ func (s *server) handlePeers(w http.ResponseWriter, r *http.Request, ih string) 
 // handleStreamSubtitles serves GET /:infoHash/:fileIdx/subtitles.vtt.
 // It constructs a local stream URL for the torrent file and delegates subtitle
 // conversion to the existing prober.WriteSubtitles path.
-//
-// @Summary  Stream subtitles as WebVTT for a torrent file
-// @Tags     Media
-// @Produce  text/vtt
-// @Success  200  {string}  string  "WebVTT"
-// @Router   /{infoHash}/{fileIdx}/subtitles.vtt [get]
 func (s *server) handleStreamSubtitles(w http.ResponseWriter, r *http.Request, ih string, idx int) {
 	// Build the local HTTP URL that the subtitle prober will pull from.
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/%s/%d", s.cfg.HTTPPort, ih, idx)
@@ -1515,16 +1432,44 @@ func validateSettingsPatch(patch map[string]any) string {
 			return "transcodeProfile must be a string or null"
 		}
 	}
+	// The tracker and update-policy keys are echoed back by GET /settings, whose
+	// stremio-core deserializer is strict about their types: a null or wrongly
+	// typed value stored here would break every later read.
+	for _, key := range []string{"allTranscodeProfiles", "cachedTrackers"} {
+		v, ok := patch[key]
+		if !ok {
+			continue
+		}
+		list, isList := v.([]any)
+		if !isList {
+			return key + " must be an array of strings"
+		}
+		for _, e := range list {
+			if _, isStr := e.(string); !isStr {
+				return key + " must be an array of strings"
+			}
+		}
+	}
+	for _, key := range []string{"trackersSourceUrl", "updateChannel"} {
+		if v, ok := patch[key]; ok {
+			if _, isStr := v.(string); !isStr {
+				return key + " must be a string"
+			}
+		}
+	}
+	if v, ok := patch["trackersLastUpdated"]; ok {
+		if n, isNum := v.(float64); !isNum || n < 0 || n != math.Trunc(n) {
+			return "trackersLastUpdated must be a non-negative integer"
+		}
+	}
+	if v, ok := patch["updateCheckIntervalHours"]; ok {
+		if n, isNum := v.(float64); !isNum || n < 0 {
+			return "updateCheckIntervalHours must be a non-negative number"
+		}
+	}
 	return ""
 }
 
-// @Summary  Get or update server settings
-// @Tags     Settings
-// @Accept   json
-// @Produce  json
-// @Success  200  {object}  map[string]interface{}
-// @Router   /settings [get]
-// @Router   /settings [post]
 func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		if !s.settingsWriteAllowed(r) {
@@ -1568,10 +1513,6 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// @Summary  Redirect to the Stremio web UI
-// @Tags     System
-// @Success  307
-// @Router   / [get]
 func (s *server) handleLanding(w http.ResponseWriter, r *http.Request) {
 	base := s.cfg.PublicURL
 	if base == "" {
@@ -1701,17 +1642,10 @@ func reshapeProbeResult(raw map[string]interface{}) map[string]any {
 // handleProbe answers /probe?url=… by reshaping the raw ffprobe output into the
 // enriched reference format (index/track/codec/channels/width/height/fps/
 // bitrate/lang/default/profile per stream, plus top-level duration).
-//
-// @Summary  Probe a stream URL with ffprobe
-// @Tags     Media
-// @Produce  json
-// @Param    url  query  string  true  "stream URL"
-// @Success  200  {object}  map[string]interface{}
-// @Router   /probe [get]
 func (s *server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	res, err := s.prober.Probe(r.URL.Query().Get("url"))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, res)
+		writeJSON(w, statusFor(err), map[string]any{"error": err.Error()})
 		return
 	}
 	raw, _ := res.(map[string]interface{})
@@ -1722,17 +1656,10 @@ func (s *server) handleProbe(w http.ResponseWriter, r *http.Request) {
 // canPlayStream expects.  The response includes all enriched fields from the
 // reference: index/track/codec/channels/width/height/fps/bitrate/lang/default/
 // profile per stream, plus top-level duration and format.name.
-//
-// @Summary  Probe a media URL for HLS transcoding
-// @Tags     HLS
-// @Produce  json
-// @Param    mediaURL  query  string  true  "media URL"
-// @Success  200  {object}  map[string]interface{}
-// @Router   /hlsv2/probe [get]
 func (s *server) handleHLSProbe(w http.ResponseWriter, r *http.Request) {
 	res, err := s.prober.Probe(r.URL.Query().Get("mediaURL"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
 	raw, _ := res.(map[string]interface{})
@@ -1748,25 +1675,6 @@ func (s *server) handleHLSProbe(w http.ResponseWriter, r *http.Request) {
 // and an invalid value is answered with 400. Names are case-sensitive:
 // unknown or mis-cased query parameters are ignored, and a repeated
 // parameter uses its first value.
-//
-// @Summary  Serve HLS playlist or segment
-// @Tags     HLS
-// @Produce  application/vnd.apple.mpegurl
-// @Param    id         path   string  true   "session id"
-// @Param    file       path   string  true   "playlist or segment"
-// @Param    mediaURL   query  string  false  "media URL to transcode (master.m3u8 only)"
-// @Param    ttl        query  string  false  "per-session idle TTL, seconds or Go duration, 60s to 30 days (master.m3u8 only; needs RIVULET_HLS_SESSION_OVERRIDES; also updates an existing session)"
-// @Param    maxWidth   query  integer false  "per-session max output width, 16-7680 (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
-// @Param    maxHeight  query  integer false  "per-session max output height, 16-7680 (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
-// @Param    bitrate    query  string  false  "per-session video bitrate, ffmpeg syntax e.g. 6M or 1.5M, 100k-200M (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
-// @Param    maxRate    query  string  false  "per-session video maxrate, >= bitrate when both given, default = bitrate (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
-// @Param    bufSize    query  string  false  "per-session video bufsize, default = 2x bitrate (master.m3u8 on session creation only; needs RIVULET_HLS_SESSION_OVERRIDES)"
-// @Success  200  {string}  string  "m3u8 / MPEG-TS / WebVTT"
-// @Failure  400  {string}  string  "invalid per-session override"
-// @Failure  404  {string}  string  "unknown session or segment"
-// @Failure  502  {string}  string  "the source failed while the segment was transcoded (reason in the body)"
-// @Failure  504  {string}  string  "the segment timed out: its origin timed out or it ran past its time limit (reason in the body)"
-// @Router   /hlsv2/{id}/{file} [get]
 func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string) {
 	if r.Method == http.MethodDelete {
 		s.handleHLSDelete(w, r, seg)
@@ -1792,11 +1700,7 @@ func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string)
 			BufSize:   q.Get("bufSize"),
 		})
 		if err != nil {
-			code := http.StatusInternalServerError
-			if errors.Is(err, types.ErrInvalidHLSOption) {
-				code = http.StatusBadRequest
-			}
-			http.Error(w, err.Error(), code)
+			http.Error(w, err.Error(), statusFor(err))
 			return
 		}
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -1831,14 +1735,6 @@ func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string)
 // reaper, and is the only way to end a session when
 // RIVULET_HLS_SESSION_TTL=0 disables idle eviction. Like every other route
 // it is gated by the Origin allowlist in ServeHTTP.
-//
-// @Summary  Delete an HLS transcode session
-// @Tags     HLS
-// @Param    id  path  string  true  "session id"
-// @Success  204  "session deleted"
-// @Failure  400  {string}  string  "invalid session id"
-// @Failure  404  {string}  string  "unknown session"
-// @Router   /hlsv2/{id} [delete]
 func (s *server) handleHLSDelete(w http.ResponseWriter, r *http.Request, seg []string) {
 	if len(seg) != 2 {
 		http.NotFound(w, r)
@@ -1857,12 +1753,6 @@ func (s *server) handleHLSDelete(w http.ResponseWriter, r *http.Request, seg []s
 	}
 }
 
-// @Summary  List media tracks for a URL
-// @Tags     Media
-// @Produce  json
-// @Param    url  path  string  true  "stream URL"
-// @Success  200  {array}  object
-// @Router   /tracks/{url} [get]
 func (s *server) handleTracks(w http.ResponseWriter, r *http.Request, seg []string) {
 	raw := ""
 	if len(seg) > 1 {
@@ -1876,35 +1766,16 @@ func (s *server) handleTracks(w http.ResponseWriter, r *http.Request, seg []stri
 	writeJSON(w, http.StatusOK, res)
 }
 
-// @Summary  Compute OpenSubtitles hash for a video URL
-// @Tags     Media
-// @Produce  json
-// @Param    videoUrl  query  string  true  "video URL"
-// @Success  200  {object}  map[string]interface{}
-// @Router   /opensubHash [get]
 func (s *server) handleOpenSubHash(w http.ResponseWriter, r *http.Request) {
 	res, err := s.prober.OpenSubHash(r.URL.Query().Get("videoUrl"))
 	writeJSON(w, statusFor(err), map[string]any{"error": errStr(err), "result": res})
 }
 
-// @Summary  List subtitle tracks for a subtitle URL
-// @Tags     Media
-// @Produce  json
-// @Param    subsUrl  query  string  true  "subtitle URL"
-// @Success  200  {object}  map[string]interface{}
-// @Router   /subtitlesTracks [get]
 func (s *server) handleSubtitlesTracks(w http.ResponseWriter, r *http.Request) {
 	res, err := s.prober.SubtitlesTracks(r.URL.Query().Get("subsUrl"))
 	writeJSON(w, statusFor(err), map[string]any{"error": errStr(err), "result": res})
 }
 
-// @Summary  Fetch and convert subtitles
-// @Tags     Media
-// @Param    ext     path   string  true   "vtt|srt"
-// @Param    from    query  string  true   "subtitle URL"
-// @Param    offset  query  int     false  "ms offset"
-// @Success  200  {string}  string
-// @Router   /subtitles.{ext} [get]
 func (s *server) handleSubtitles(w http.ResponseWriter, r *http.Request, ext string) {
 	q := r.URL.Query()
 	offset := 0
@@ -2110,10 +1981,13 @@ func cpus() []any {
 }
 
 func statusFor(err error) int {
-	if err != nil {
-		return http.StatusInternalServerError
+	switch {
+	case err == nil:
+		return http.StatusOK
+	case errors.Is(err, types.ErrInvalidMediaURL), errors.Is(err, types.ErrInvalidHLSOption):
+		return http.StatusBadRequest // the caller's URL/option, not a server fault
 	}
-	return http.StatusOK
+	return http.StatusInternalServerError
 }
 
 func errStr(err error) any {
@@ -2239,12 +2113,6 @@ func buildStreamProxyConfig(cfg types.Config, client *http.Client, privateAllow 
 // external stream with injected request/response headers (proxyStreamsEnabled or
 // per-stream proxyHeaders). opts is a URLSearchParams string: d=<origin>,
 // repeated h=<reqHeader>, repeated r=<respHeader>.
-//
-// @Summary  Reverse-proxy an external stream URL
-// @Tags     Proxy
-// @Param    rest  path  string  true  "opts/path"
-// @Success  200  {string}  string
-// @Router   /proxy/{rest} [get]
 func (s *server) handleProxy(w http.ResponseWriter, r *http.Request, seg []string) {
 	if len(seg) < 2 {
 		http.NotFound(w, r)
@@ -2394,6 +2262,10 @@ func writeEngineErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, types.ErrTooManyEngines) {
 		w.Header().Set("Retry-After", "5")
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if errors.Is(err, types.ErrInvalidInfoHash) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)

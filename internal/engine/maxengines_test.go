@@ -54,3 +54,34 @@ func TestEngineCapEvictsOldestIdleThenRejects(t *testing.T) {
 		t.Fatalf("err = %v, want ErrTooManyEngines", err)
 	}
 }
+
+// TestEnsureEngineRejectsZeroInfoHash: anacrolix/torrent panics on the
+// all-zero info hash while the manager lock is held, which wedged every later
+// request. It must be refused up front and leave the manager usable.
+func TestEnsureEngineRejectsZeroInfoHash(t *testing.T) {
+	em, err := New(newJanitorTestCfg(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = em.Close() }()
+
+	for _, ih := range []string{"0000000000000000000000000000000000000000"} {
+		if _, err := em.EnsureEngine(ih, types.AddOptions{}); !errors.Is(err, types.ErrInvalidInfoHash) {
+			t.Fatalf("EnsureEngine(%s) err = %v, want ErrInvalidInfoHash", ih, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := em.EnsureEngine("08ada5a7a6183aae1e09d831df6748d566095a10", types.AddOptions{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("EnsureEngine after zero hash: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("manager wedged after a zero info hash")
+	}
+}

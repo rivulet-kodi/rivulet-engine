@@ -75,7 +75,8 @@ make vet          # go vet ./...
 make fmt          # gofmt -s -w .
 make fmt-check    # fail if not gofmt -s clean
 make lint         # golangci-lint run ./... (if installed)
-make swagger      # regenerate docs/swagger.{yaml,json} from // @… annotations (needs swaggo/swag)
+make api-fuzz     # fuzz the HTTP API with Schemathesis against internal/api/openapi.json (docker/podman; see Testing & QA)
+make dup-baseline # re-lock the dupl duplication ratchet (.github/dup-baseline.json) after deliberate changes
 make build-all    # cross-compile all 11 release targets → dist/ (android/{arm,arm64} need ANDROID_ARM_CC / ANDROID_ARM64_CC)
 make smoke        # ./scripts/smoke.sh end-to-end API test (needs a running build)
 ```
@@ -150,13 +151,14 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 - `internal/types/types.go` — the interface + wire-shape contract (`Stats`, `Options`).
 - `internal/engine/engine.go` + `trackers.go` — torrent client, readers, ranked tracker list.
 - `internal/media/hls.go` — HLS session manager (path-traversal-guarded session ids).
-- `.golangci.yml`, `Makefile`, `Dockerfile`, `.goreleaser.yml`, `docs/swagger.yaml`.
+- `.golangci.yml`, `Makefile`, `Dockerfile`, `.goreleaser.yml`, `internal/api/openapi.json` (hand-maintained OpenAPI 3.1 spec, served at `/openapi.json`; Scalar reference at `/api/reference`).
 
 ## Runtime / Tooling Preferences
 
 - **Go versions:** `go.mod` directive is **1.27.3** (latest patch; `govulncheck` in CI scans the stdlib of exactly this version, so bump it when a Go point release fixes a reachable stdlib vuln); Docker build image is **`golang:1.27.3-alpine3.24`** (keep it on the same patch as `go.mod`). CI uses `go-version-file: go.mod`. Keep the go.mod directive build-compatible across the cross-compile matrix.
 - **`CGO_ENABLED=0`** everywhere — no native deps.
 - **golangci-lint v2** (`bodyclose, errcheck, errorlint, gosec, govet, ineffassign, misspell, revive, staticcheck, unconvert, unused, whitespace`). `gosec` excludes by-design rules (variable URLs/subprocess/file paths — this is a localhost media server). `_test.go` files skip `errcheck`/`gosec`/`bodyclose`/`unparam` but still face `gofmt`/`staticcheck`/`revive`.
+- **Dev tools** (`govulncheck`, `actionlint`, `deadcode`, `dupl`) are pinned in the separate module `tools/go.mod` as `go tool` directives; run them with `go tool -modfile=tools/go.mod <name>` (Dependabot tracks `/tools`). CI also runs `go mod tidy -diff` (both modules), `scripts/dup-check.sh` (dupl ratchet), actionlint + zizmor, dependency-review (PRs), report-only Trivy (image/fs/config, SARIF), CodeQL, Scorecard and a weekly Trivy scan of published ghcr.io images. `deadcode` is not gated: it reports unreachable funcs from the `cmd/rivulet-engine` roots (the `librivulet-engine` cgo entry points, `internal/nzb`, parts of `ftpstream`/`streamproxy`).
 - **Runtime deps** for full functionality: `ffmpeg`/`ffprobe` (HLS/probe/subtitles), `yt-dlp` (`/yt`). Bundled in the container image.
 - Config knobs are env vars (`RIVULET_*`, `HTTP_PORT`, `APP_PATH`, …) — see `docs/CONFIGURATION.md`; add new ones in `main.go` and document them there.
 
@@ -176,3 +178,30 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
   shapes against the `server.js`/`stremio-core` contract (see
   `internal/types/types_test.go` `TestOptionsJSONShape`); keep benchmarks
   (`bench_test.go`) green as perf-regression guards. `cmd/` has no tests (thin wiring).
+- **OpenAPI spec**: `internal/api/openapi.json` (OpenAPI 3.1.1, hand-maintained,
+  `go:embed`ded, served at `GET /openapi.json`; Scalar reference at
+  `/api/reference`, vendored bundle updated with `scripts/update-scalar.sh`).
+  A new or changed route, parameter, status code or response body MUST be
+  reflected in it in the same change. `TestOpenAPISpecMatchesRoutes` keeps the
+  top-level path segments of `route()` and the spec in step; the fuzzer below
+  checks the rest.
+- **API fuzzing** (`make api-fuzz` = `scripts/api-fuzz.sh pr`; CI workflow
+  `api-fuzz.yml`: fixed-seed PR run + nightly random seed): builds the image,
+  runs the engine on an `--internal` container network (no egress; trackers,
+  metadata and IMDb lookups off) and runs the digest-pinned Schemathesis
+  image against `openapi.json` with `not_a_server_error`,
+  `response_schema_conformance`, `status_code_conformance` and the custom
+  `foreign_origin_rejected` check (`tests/apifuzz/hooks.py`: every operation
+  replayed with `Origin: https://evil.example` must answer 403).
+  `tests/apifuzz/schemathesis.toml` lists the operations that are never fuzzed
+  (each with its reason) and the known issues deferred from triage. Env knobs:
+  `RIVULET_FUZZ_SEED`, `RIVULET_FUZZ_EXAMPLES`, `RIVULET_FUZZ_REPORT_DIR`,
+  `RIVULET_FUZZ_DOCKER` (docker or podman), `RIVULET_FUZZ_IMAGE` (prebuilt engine
+  image), `RIVULET_FUZZ_URL` (fuzz a running server) with
+  `SCHEMATHESIS='uvx schemathesis@4.32.5'` for a local CLI. A failure replays with
+  `RIVULET_FUZZ_SEED=<seed from the log>`; the JUnit report, VCR cassette and engine log are
+  in the report dir (uploaded as the `api-fuzz-report` CI artifact).
+
+## Review skills
+
+`.agents/skills/` vendors Go review skills (samber/cc-skills-golang, MIT). Which to load for which area, and the conflict rule (this file wins), is in `.agents/rules/review-skills.md`; reusable workflows (`ci-fix`, `pr`, `review`, `smoke`) are in `.agents/commands/`.

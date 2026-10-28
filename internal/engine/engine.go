@@ -479,6 +479,9 @@ func (m *manager) oldestIdleLocked() string {
 // in-flight removal.
 func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.Engine, error) {
 	ih := strings.ToLower(infoHash)
+	if strings.Trim(ih, "0") == "" {
+		return nil, fmt.Errorf("engine: info hash %q: %w", ih, types.ErrInvalidInfoHash)
+	}
 
 	for {
 		// Fast path: already exists.
