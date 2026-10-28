@@ -360,6 +360,10 @@ var ErrInvalidHLSOption = errors.New("invalid HLS session option")
 // maps it to 400 Bad Request.
 var ErrInvalidMediaURL = errors.New("invalid media URL")
 
+// ErrSubtitleNotFound is matched (errors.Is) by MediaProber.WriteSubtitles when
+// the subtitle source answered 404/410. The API layer maps it to 404 Not Found.
+var ErrSubtitleNotFound = errors.New("subtitle source not found")
+
 // MediaProber backs the ffmpeg-based helper routes. Implementations shell out
 // to ffprobe/ffmpeg. Methods return values that are JSON-encoded verbatim.
 type MediaProber interface {

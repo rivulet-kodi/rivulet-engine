@@ -51,6 +51,8 @@ func TestMediaRoutesMapCallerErrorsTo400(t *testing.T) {
 		{"/hlsv2/probe", bad, http.StatusBadRequest},
 		{"/opensubHash", bad, http.StatusBadRequest},
 		{"/subtitlesTracks", bad, http.StatusBadRequest},
+		{"/tracks/x", bad, http.StatusBadRequest},
+		{"/tracks/x", fmt.Errorf("ffprobe exploded"), http.StatusInternalServerError},
 		{"/opensubHash?videoUrl=http://x/y", fmt.Errorf("HEAD failed"), http.StatusInternalServerError},
 	} {
 		h := New(newFakeEM(), &fakeSS{}, &fakeProber{probeErr: tc.err}, types.Config{
@@ -60,10 +62,44 @@ func TestMediaRoutesMapCallerErrorsTo400(t *testing.T) {
 		if rec.Code != tc.want {
 			t.Errorf("%s: status = %d, want %d (body %q)", tc.path, rec.Code, tc.want, rec.Body.String())
 		}
-		if tc.path == "/probe" || strings.HasPrefix(tc.path, "/probe?") {
+		if tc.path == "/probe" || strings.HasPrefix(tc.path, "/probe?") || strings.HasPrefix(tc.path, "/tracks/") {
 			var m map[string]any
 			if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil || m["error"] == nil {
 				t.Errorf("%s: body %q is not a JSON error object", tc.path, rec.Body.String())
+			}
+		}
+	}
+}
+
+// TestSubtitleRoutesReportFailures: a failed subtitle conversion used to be a
+// 200 with an empty body (headers were written before the error was known). It
+// is now 400 for a bad source URL, 404 for a missing source and 502 for any
+// other fetch/parse failure, with a JSON error body.
+func TestSubtitleRoutesReportFailures(t *testing.T) {
+	for _, path := range []string{
+		"/subtitles.vtt?from=http://x/y.srt",
+		"/subtitles.srt?from=http://x/y.srt",
+		"/" + testIH + "/0/subtitles.vtt",
+	} {
+		for _, tc := range []struct {
+			name string
+			err  error
+			want int
+		}{
+			{"bad url", fmt.Errorf("unsupported URL scheme %q: %w", "", types.ErrInvalidMediaURL), http.StatusBadRequest},
+			{"not found", fmt.Errorf("upstream status 404: %w", types.ErrSubtitleNotFound), http.StatusNotFound},
+			{"upstream failure", fmt.Errorf("dial tcp: connection refused"), http.StatusBadGateway},
+		} {
+			h := New(newFakeEM(testEngine()), &fakeSS{}, &fakeProber{writeSubsErr: tc.err}, types.Config{
+				HTTPPort: 11470, WebUI: "https://web.stremio.com/", AppPath: t.TempDir(),
+			})
+			rec := serve(t, h, http.MethodGet, path, nil)
+			if rec.Code != tc.want {
+				t.Errorf("%s (%s): status = %d, want %d", path, tc.name, rec.Code, tc.want)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil || m["error"] == nil {
+				t.Errorf("%s (%s): body %q is not a JSON error object", path, tc.name, rec.Body.String())
 			}
 		}
 	}

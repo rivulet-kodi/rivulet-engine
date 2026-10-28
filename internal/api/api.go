@@ -13,6 +13,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -1255,6 +1256,12 @@ func (s *server) handleCreateBlob(w http.ResponseWriter, r *http.Request) {
 func (s *server) writeStats(w http.ResponseWriter, ih string, idx int) {
 	eng, ok := s.em.GetEngine(ih)
 	if !ok {
+		// By design (server.js parity): 200 `null`, NOT 404. stremio-core
+		// deserializes this endpoint as Option<Statistics> (get_torrent_statistics,
+		// Internal::StreamingServerStatisticsResult): `null` means "no stats /
+		// fully loaded, keep the last value", while any non-2xx becomes
+		// Loadable::Err in the UI. stremio-video's fetchVideoParams also rejects
+		// `null` explicitly rather than relying on the status.
 		writeJSON(w, http.StatusOK, nil)
 		return
 	}
@@ -1321,10 +1328,7 @@ func (s *server) handlePeers(w http.ResponseWriter, r *http.Request, ih string) 
 func (s *server) handleStreamSubtitles(w http.ResponseWriter, r *http.Request, ih string, idx int) {
 	// Build the local HTTP URL that the subtitle prober will pull from.
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/%s/%d", s.cfg.HTTPPort, ih, idx)
-	setActiveContentGuards(w.Header())
-	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	// best-effort: WriteSubtitles may fail if the file isn't a subtitle stream
-	_ = s.prober.WriteSubtitles(w, streamURL, "vtt", 0)
+	s.writeSubtitlesResponse(w, streamURL, "vtt", 0, "text/vtt; charset=utf-8")
 }
 
 // ---- info / settings ------------------------------------------------------
@@ -1760,7 +1764,10 @@ func (s *server) handleTracks(w http.ResponseWriter, r *http.Request, seg []stri
 	}
 	res, err := s.prober.Tracks(raw)
 	if err != nil {
-		writeJSON(w, http.StatusOK, []any{})
+		// Same mapping as /probe. stremio-video's tracksData.js treats any
+		// non-array body as "no extra tracks" (filter throws, .catch → cb(false)),
+		// so a real error status is safe for the client.
+		writeJSON(w, statusFor(err), map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -1782,16 +1789,33 @@ func (s *server) handleSubtitles(w http.ResponseWriter, r *http.Request, ext str
 	if o := q.Get("offset"); o != "" {
 		offset, _ = strconv.Atoi(o)
 	}
-	setActiveContentGuards(w.Header())
+	ct := "text/plain; charset=utf-8"
 	if ext == "vtt" {
-		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	} else {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		ct = "text/vtt; charset=utf-8"
 	}
-	if err := s.prober.WriteSubtitles(w, q.Get("from"), ext, offset); err != nil {
-		// headers may already be sent; best effort
+	s.writeSubtitlesResponse(w, q.Get("from"), ext, offset, ct)
+}
+
+// writeSubtitlesResponse converts the subtitle at from and writes it with
+// content type ct. The conversion is buffered so a failure can still be
+// reported with a status: 400 for a source URL the caller got wrong, 404 when
+// the source answered 404/410, 502 for any other fetch/parse failure.
+func (s *server) writeSubtitlesResponse(w http.ResponseWriter, from, ext string, offset int, ct string) {
+	setActiveContentGuards(w.Header())
+	var buf bytes.Buffer
+	if err := s.prober.WriteSubtitles(&buf, from, ext, offset); err != nil {
+		code := http.StatusBadGateway
+		switch {
+		case errors.Is(err, types.ErrInvalidMediaURL):
+			code = http.StatusBadRequest
+		case errors.Is(err, types.ErrSubtitleNotFound):
+			code = http.StatusNotFound
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", ct)
+	_, _ = w.Write(buf.Bytes())
 }
 
 // ---- helpers --------------------------------------------------------------

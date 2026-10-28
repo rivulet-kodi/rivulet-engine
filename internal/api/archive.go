@@ -537,7 +537,7 @@ func (s *archiveSession) entry(name string) (archive.Entry, error) {
 	}
 	e, ok := s.listing[name]
 	if !ok {
-		return archive.Entry{}, fmt.Errorf("entry %q not found in archive", name)
+		return archive.Entry{}, fmt.Errorf("entry %q %w", name, errArchiveEntryNotFound)
 	}
 	return e, nil
 }
@@ -1043,11 +1043,20 @@ func archiveDownload(u string) (string, error) {
 	if err := validateFetchHost(u); err != nil {
 		return "", err
 	}
-	resp, err := archiveDownloadClient.Get(u)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := archiveDownloadClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	body := &archiveCountingReader{r: resp.Body}
+	stopWatch := archiveWatchStall(body, cancel)
+	defer stopWatch()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET %s: status %d", u, resp.StatusCode)
 	}
@@ -1057,7 +1066,10 @@ func archiveDownload(u string) (string, error) {
 	}
 	// Cap at archiveMaxDownloadBytes; use +1 so we can detect an overflow by
 	// checking whether we copied strictly more than the limit.
-	n, copyErr := io.Copy(f, io.LimitReader(resp.Body, archiveMaxDownloadBytes+1))
+	n, copyErr := io.Copy(f, io.LimitReader(body, archiveMaxDownloadBytes+1))
+	if copyErr != nil && errors.Is(context.Cause(ctx), errArchiveStalled) {
+		copyErr = errArchiveStalled
+	}
 	if copyErr != nil || n > archiveMaxDownloadBytes {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
@@ -1069,6 +1081,58 @@ func archiveDownload(u string) (string, error) {
 	name := f.Name()
 	_ = f.Close()
 	return name, nil
+}
+
+// Archive downloads have no overall timeout (see archiveDownloadClient), so an
+// upstream that trickles bytes forever would hold the create request — and
+// every waiter on its build flight — open until the size cap. Instead each
+// window of archiveStallWindow must deliver at least archiveMinWindowBytes.
+var (
+	archiveStallWindow    = 60 * time.Second
+	archiveMinWindowBytes = int64(1 << 20) // ≈17 KiB/s sustained
+)
+
+// errArchiveStalled reports a download below the minimum throughput.
+var errArchiveStalled = errors.New("download stalled: below minimum throughput")
+
+// archiveCountingReader counts bytes for archiveWatchStall.
+type archiveCountingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *archiveCountingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// archiveWatchStall cancels the download (via cancel, with cause
+// errArchiveStalled) when a window passes with fewer than
+// archiveMinWindowBytes read. It also covers a fully silent upstream, which
+// would otherwise block in Read forever. The returned stop ends the watch.
+func archiveWatchStall(c *archiveCountingReader, cancel context.CancelCauseFunc) (stop func()) {
+	done := make(chan struct{})
+	window, minBytes := archiveStallWindow, archiveMinWindowBytes
+	go func() {
+		t := time.NewTicker(window)
+		defer t.Stop()
+		var last int64
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				cur := c.n.Load()
+				if cur-last < minBytes {
+					cancel(errArchiveStalled)
+					return
+				}
+				last = cur
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // archiveNewKey returns a random 32-hex-char session key.
@@ -1097,6 +1161,10 @@ const archiveCopyBufSize = 256 << 10
 // errArchiveOpenFile marks failures to open the extracted/archive file so the
 // handler keeps its historical "open extracted file: …" message.
 var errArchiveOpenFile = errors.New("open extracted file")
+
+// errArchiveEntryNotFound marks a request for an entry name that is not in the
+// archive: the caller's mistake, answered 404 rather than 500.
+var errArchiveEntryNotFound = errors.New("not found in archive")
 
 // archiveExtractFlight is one background extraction of a single archive entry
 // into a temp file. The goroutine that started it does the work; every request
@@ -1318,27 +1386,6 @@ func (s *archiveSession) lookupExtraction(entryName string) (*archiveExtractFlig
 		return fl, "", true
 	}
 	return nil, "", false
-}
-
-// archiveExtractEntry extracts entryName from the session's archive to a temp
-// file under sess.tmpDir and returns its path once the extraction is complete.
-// Subsequent calls return the cached path without re-extraction; concurrent
-// calls share one extraction. A failed extraction is not cached, so a later
-// request may retry. The stream handler does not use this: it serves the file
-// while it is still being written (see archiveOpenEntry).
-func archiveExtractEntry(sess *archiveSession, entryName string) (string, error) {
-	fl, path, err := archiveStartExtract(sess, entryName)
-	if err != nil {
-		return "", err
-	}
-	if fl == nil {
-		return path, nil
-	}
-	<-fl.done
-	if fl.err != nil {
-		return "", fl.err
-	}
-	return fl.path, nil
 }
 
 // archiveRunExtract is the body of a flight's goroutine. It always discards the
@@ -2254,7 +2301,9 @@ func (s *server) archiveHandleStream(w http.ResponseWriter, r *http.Request, seg
 
 	body, err := archiveOpenEntry(r.Context(), sess, entryName)
 	if err != nil {
-		if errors.Is(err, errArchiveOpenFile) {
+		if errors.Is(err, errArchiveEntryNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else if errors.Is(err, errArchiveOpenFile) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		} else {
 			http.Error(w, "extract: "+err.Error(), http.StatusInternalServerError)

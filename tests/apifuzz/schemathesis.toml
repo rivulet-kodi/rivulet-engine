@@ -40,6 +40,21 @@ include-name = "GET /proxy/ip"
 expected-statuses = ["2xx", "3xx", "4xx", "502"]
 
 [[operations]]
+# 502 is the documented answer when the subtitle source cannot be fetched; the
+# fuzzer supplies random public URLs and the fuzz network has no egress.
+include-name = "GET /subtitles.{ext}"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+# Same 502 (the handler fetches its own stream URL and may find it unreachable).
+include-name = "GET /{infoHash}/{fileIdx}/subtitles.vtt"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
 # yt-dlp has no network on the fuzz network; 502 is its failure answer.
 include-name = "GET /yt/{id}"
 
@@ -77,20 +92,17 @@ expected-statuses = ["2xx", "3xx", "4xx", "504"]
 # fuzzer cannot reach statelessly or that were judged out of scope, kept so
 # they are not forgotten. Each one is a candidate for its own fix + test.
 #
-# * Stateful routes (/nzb/stream, /{archiveType}/stream, /record, /casting/{id},
-#   /api/recordings/{id}, /hlsv2/{id}, /local-addon/file/{hash}) need a session,
-#   recording or device the fuzzer cannot create without real media, an NZB
-#   server or a DLNA device. They are exercised only on their 404 path
-#   ("Missing test data" warnings); the stateful phase is disabled.
-# * GET /{archiveType}/stream/{key}/{file} answers 500 (not 404) when the named
-#   entry does not exist in the archive (internal/api/archive.go,
-#   archiveOpenEntry callers). Not reproducible without an archive session.
-# * GET /{infoHash}/{fileIdx}/subtitles.vtt and GET /subtitles.{ext} answer 200
-#   with an empty body when the conversion fails: headers are already written
-#   when prober.WriteSubtitles errors. Documented as-is in the spec; the
-#   stremio-web player tolerates the empty track.
-# * GET /{infoHash}/stats.json answers 200 `null` for an unknown engine, and
-#   GET /tracks/{url} turns every failure into 200 `[]`: server.js parity,
-#   documented as-is in the spec.
+# * This (main) pass only sees the "nothing there" paths of the stateful routes
+#   (/nzb/*, /{zip,tar,tgz,7zip,rar}/*, /record*, /api/recordings*, /hlsv2/*,
+#   /local-addon/*, /probe): the "stateful" pass of the same script reaches their
+#   success paths against fixtures (stateful.toml, fixtures.py). What neither
+#   pass reaches: /casting/* past its 404 (SSDP discovery is multicast and no
+#   renderer exists offline), /subtitles.{ext} and /opensubHash success (their
+#   fetch ignores the private-host allowlist), and the torrent routes (no
+#   peers offline).
+# * GET /{infoHash}/stats.json answers 200 `null` for an unknown engine: by
+#   design (server.js parity). stremio-core deserializes it as
+#   Option<Statistics>; `null` is a valid "no update" result, a 404 would
+#   surface as an error in the UI.
 # * POST /settings is not disabled: it mutates the fuzz engine's settings on
 #   disk only, which is thrown away with the container.

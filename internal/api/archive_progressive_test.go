@@ -458,14 +458,15 @@ func TestArchiveStream_ErrorsBeforeFirstByteAre500(t *testing.T) {
 
 	h := newHandler(t)
 	key, sess := progCreate(t, h, p, "zip")
-	for _, name := range []string{"missing.mkv", "bad.mkv"} {
-		rec := progGet(h, http.MethodGet, "zip", key, name, "")
-		if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Body.String(), "extract: ") {
-			t.Errorf("%s: status %d body %q, want 500 \"extract: …\"", name, rec.Code, rec.Body.String())
-		}
+	// A corrupt entry is a server-side fault (500); a name that is not in the
+	// archive is the caller's mistake (404).
+	rec := progGet(h, http.MethodGet, "zip", key, "bad.mkv", "")
+	if rec.Code != http.StatusInternalServerError || !strings.HasPrefix(rec.Body.String(), "extract: ") {
+		t.Errorf("bad.mkv: status %d body %q, want 500 \"extract: …\"", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(progGet(h, http.MethodGet, "zip", key, "missing.mkv", "").Body.String(), `entry "missing.mkv" not found in archive`) {
-		t.Error("missing entry message changed")
+	rec = progGet(h, http.MethodGet, "zip", key, "missing.mkv", "")
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `entry "missing.mkv" not found in archive`) {
+		t.Errorf("missing.mkv: status %d body %q, want 404 with the entry message", rec.Code, rec.Body.String())
 	}
 	progWaitFlights(t, sess)
 	sess.mu.Lock()

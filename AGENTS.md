@@ -158,7 +158,7 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
 - **Go versions:** `go.mod` directive is **1.27.3** (latest patch; `govulncheck` in CI scans the stdlib of exactly this version, so bump it when a Go point release fixes a reachable stdlib vuln); Docker build image is **`golang:1.27.3-alpine3.24`** (keep it on the same patch as `go.mod`). CI uses `go-version-file: go.mod`. Keep the go.mod directive build-compatible across the cross-compile matrix.
 - **`CGO_ENABLED=0`** everywhere — no native deps.
 - **golangci-lint v2** (`bodyclose, errcheck, errorlint, gosec, govet, ineffassign, misspell, revive, staticcheck, unconvert, unused, whitespace`). `gosec` excludes by-design rules (variable URLs/subprocess/file paths — this is a localhost media server). `_test.go` files skip `errcheck`/`gosec`/`bodyclose`/`unparam` but still face `gofmt`/`staticcheck`/`revive`.
-- **Dev tools** (`govulncheck`, `actionlint`, `deadcode`, `dupl`) are pinned in the separate module `tools/go.mod` as `go tool` directives; run them with `go tool -modfile=tools/go.mod <name>` (Dependabot tracks `/tools`). CI also runs `go mod tidy -diff` (both modules), `scripts/dup-check.sh` (dupl ratchet), actionlint + zizmor, dependency-review (PRs), report-only Trivy (image/fs/config, SARIF), CodeQL, Scorecard and a weekly Trivy scan of published ghcr.io images. `deadcode` is not gated: it reports unreachable funcs from the `cmd/rivulet-engine` roots (the `librivulet-engine` cgo entry points, `internal/nzb`, parts of `ftpstream`/`streamproxy`).
+- **Dev tools** (`govulncheck`, `actionlint`, `deadcode`, `dupl`) are pinned in the separate module `tools/go.mod` as `go tool` directives; run them with `go tool -modfile=tools/go.mod <name>` (Dependabot tracks `/tools`). CI also runs `go mod tidy -diff` (both modules), `scripts/dup-check.sh` (dupl ratchet), `scripts/deadcode-check.sh` (deadcode gate), actionlint + zizmor, dependency-review (PRs), report-only Trivy (image/fs/config, SARIF), CodeQL, Scorecard and a weekly Trivy scan of published ghcr.io images. `scripts/deadcode-check.sh` runs `deadcode` without `-test` and must report zero unreachable funcs: production code that only tests call belongs in a `_test.go` file (or gets deleted). The `cmd/librivulet-engine` cgo package is excluded (its `//export` entry points are called from C, not a Go `main`), and code only that library reaches is listed with a reason in `scripts/deadcode-allow.txt` (stale entries fail the check).
 - **Runtime deps** for full functionality: `ffmpeg`/`ffprobe` (HLS/probe/subtitles), `yt-dlp` (`/yt`). Bundled in the container image.
 - Config knobs are env vars (`RIVULET_*`, `HTTP_PORT`, `APP_PATH`, …) — see `docs/CONFIGURATION.md`; add new ones in `main.go` and document them there.
 
@@ -194,7 +194,15 @@ Benchmarks: `go test -bench . -benchmem ./internal/api/`.
   `foreign_origin_rejected` check (`tests/apifuzz/hooks.py`: every operation
   replayed with `Origin: https://evil.example` must answer 403).
   `tests/apifuzz/schemathesis.toml` lists the operations that are never fuzzed
-  (each with its reason) and the known issues deferred from triage. Env knobs:
+  (each with its reason) and the known issues deferred from triage. A second,
+  "stateful" pass (`tests/apifuzz/stateful.toml`) runs a permissive engine (DVR,
+  local archives and files, private hosts allowed for the fixtures only) next to
+  `tests/apifuzz/fixtures.py` (stdlib-only: archives in every format, an NZB
+  served by a fake NNTP server, a video, a never-ending TS stream), creates the
+  sessions and recordings under known keys and feeds them back through
+  Schemathesis dictionaries, so archive, NZB, DVR, HLS and local-files routes
+  reach their success paths; casting, subtitle fetches and torrents are out of
+  reach offline. Env knobs: `RIVULET_FUZZ_PASS` (`main`, `stateful` or `all`),
   `RIVULET_FUZZ_SEED`, `RIVULET_FUZZ_EXAMPLES`, `RIVULET_FUZZ_REPORT_DIR`,
   `RIVULET_FUZZ_DOCKER` (docker or podman), `RIVULET_FUZZ_IMAGE` (prebuilt engine
   image), `RIVULET_FUZZ_URL` (fuzz a running server) with
