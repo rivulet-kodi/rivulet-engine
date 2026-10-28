@@ -1450,3 +1450,35 @@ func TestFtoaBasic(t *testing.T) {
 		t.Errorf("ftoa mismatch: got %q, want %q", got, want)
 	}
 }
+
+// TestWriteSubtitlesUpstreamStatus: a 404/410 source matches
+// types.ErrSubtitleNotFound, any other non-2xx status is a plain error, and
+// neither is turned into an empty-but-successful conversion.
+func TestWriteSubtitlesUpstreamStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		notFound bool
+	}{
+		{http.StatusNotFound, true},
+		{http.StatusGone, true},
+		{http.StatusInternalServerError, false},
+		{http.StatusForbidden, false},
+	} {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = fmt.Fprint(w, "1\n00:00:01,000 --> 00:00:02,000\nnot a subtitle\n\n")
+		}))
+		base := stubOpenSubClientTransport(t, ts)
+		p := &prober{}
+		var buf strings.Builder
+		err := p.WriteSubtitles(&buf, base+"/sub.srt", "srt", 0)
+		ts.Close()
+		if err == nil {
+			t.Errorf("status %d: WriteSubtitles succeeded, want an error", tc.status)
+			continue
+		}
+		if got := errors.Is(err, types.ErrSubtitleNotFound); got != tc.notFound {
+			t.Errorf("status %d: errors.Is(ErrSubtitleNotFound) = %v, want %v (err %v)", tc.status, got, tc.notFound, err)
+		}
+	}
+}

@@ -1,0 +1,284 @@
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
+#
+# SPDX-License-Identifier: MIT
+
+# Schemathesis configuration for the "stateful" pass of scripts/api-fuzz.sh.
+#
+# The main pass fuzzes a default engine, where the routes below only ever see
+# their 404 path: there is no archive, NZB session, recording or HLS session to
+# address. This pass runs against a second engine started with the features on
+# (scripts/api-fuzz.sh documents the environment) next to the fixture server of
+# tests/apifuzz/fixtures.py. Its `setup` step creates the sessions under fixed
+# keys and records the DVR fixtures; the dictionaries below feed those keys, and
+# the recording ids written by setup, back into the generated requests. A
+# dictionary entry is drawn with the given probability, so the same operation is
+# still fuzzed with random keys, ids and payloads (404 / 400 paths) the rest of
+# the time.
+#
+# What is not here: /casting (SSDP discovery is multicast UDP; there is no
+# DLNA renderer on the fuzz network, so those routes only answer their
+# "no such device" 404 in the main pass), /subtitles.* and /opensubHash
+# (their fetches never use the private allowlist, so a fixture host is refused
+# by design) and the torrent routes (no peers offline).
+
+color = false
+
+# --- Fixture values ----------------------------------------------------------------
+# lz = lz-string (compressToEncodedURIComponent) of the JSON shown above it.
+
+[dictionaries.lz-zip]
+values = [
+	# {"url":"/fixtures/clip.zip"}
+	"N4IgrgTgNiBcIHoBmBLAHgF0gUwM4IGMoUAHAOgC9SQBfIA",
+	# {"url":"http://fixtures:8080/clip.zip"}
+	"N4IgrgTgNiBcIAsAuSAOsD0GBmBLAHkpAKYDOsAHAAzUYDGUuqAdAF5MgC+QA",
+]
+
+[dictionaries.lz-tar]
+values = [
+	# {"url":"/fixtures/clip.tar"}
+	"N4IgrgTgNiBcIHoBmBLAHgF0gUwM4IGMoUAHAOgwEMIQBfIA",
+]
+
+[dictionaries.lz-tgz]
+values = [
+	# {"url":"/fixtures/clip.tgz"}
+	"N4IgrgTgNiBcIHoBmBLAHgF0gUwM4IGMoUAHAOgwHMAvEAXyA",
+]
+
+[dictionaries.lz-7zip]
+values = [
+	# {"url":"/fixtures/clip.7z"}
+	"N4IgrgTgNiBcIHoBmBLAHgF0gUwM4IGMoUAHAOgHYAvEAXyA",
+]
+
+[dictionaries.lz-rar]
+values = [
+	# {"url":"/fixtures/clip.rar"}
+	"N4IgrgTgNiBcIHoBmBLAHgF0gUwM4IGMoUAHAOggEMIQBfIA",
+]
+
+[dictionaries.lz-nzb]
+values = [
+	# {"servers":["nntp://fixtures:1119"],"nzbUrl":"http://fixtures:8080/clip.nzb"}
+	"N4IgzgpgTgbtYgFwG0QDs0BcAOiD0eAZgJYAemArlBGIgIwMCcIAugDToBeARgKpQAbJCAAWmHPiJlK1WgA4ADIrwBjAcWwA6NDxABfIA",
+]
+
+# The `url` of a POST body, with probability 1: Schemathesis otherwise reuses a
+# `url` field from an earlier response, and the one of a recording is
+# /live.ts, a download that never ends (it would hold the request open). The
+# list keeps a missing file, a missing URL and a non-URL as the failing inputs.
+
+[dictionaries.url-zip]
+values = ["/fixtures/clip.zip", "http://fixtures:8080/clip.zip", "/fixtures/missing.zip", "http://fixtures:8080/missing.zip", "not a url"]
+
+[dictionaries.url-tar]
+values = ["/fixtures/clip.tar", "http://fixtures:8080/clip.tar", "/fixtures/missing.tar", "http://fixtures:8080/missing.tar", "not a url"]
+
+[dictionaries.url-tgz]
+values = ["/fixtures/clip.tgz", "http://fixtures:8080/clip.tgz", "/fixtures/missing.tgz", "http://fixtures:8080/missing.tgz", "not a url"]
+
+[dictionaries.url-7zip]
+values = ["/fixtures/clip.7z", "http://fixtures:8080/clip.7z", "/fixtures/missing.7z", "http://fixtures:8080/missing.7z", "not a url"]
+
+[dictionaries.url-rar]
+values = ["/fixtures/clip.rar", "http://fixtures:8080/clip.rar", "/fixtures/missing.rar", "http://fixtures:8080/missing.rar", "not a url"]
+
+[dictionaries.archive-keys]
+values = ["fuzz-zip", "fuzz-tar", "fuzz-tgz", "fuzz-7zip", "fuzz-rar"]
+
+[dictionaries.archive-entries]
+values = ["clip.mp4", "readme.txt"]
+
+[dictionaries.nzb-keys]
+values = ["fuzz-nzb"]
+
+[dictionaries.nzb-files]
+values = ["clip.mp4"]
+
+[dictionaries.hls-ids]
+values = ["fuzz-hls"]
+
+[dictionaries.media-urls]
+values = ["http://fixtures:8080/clip.mp4", "http://fixtures:8080/clip.ts"]
+
+[dictionaries.hls-files]
+values = ["master.m3u8", "playlist.m3u8", "seg0.ts"]
+
+# Bound with probability 1 below (see url-zip): the failing inputs are in the list.
+[dictionaries.record-urls]
+values = ["http://fixtures:8080/clip.ts", "http://fixtures:8080/missing.ts", "ftp://fixtures/clip.ts", "not a url", ""]
+
+[dictionaries.nzb-urls]
+values = ["http://fixtures:8080/clip.nzb", "http://fixtures:8080/missing.nzb", "not a url"]
+
+[dictionaries.local-hashes]
+values = ["99775d46aa43242f"]
+
+[dictionaries.local-ids]
+values = ["local:99775d46aa43242f", "local:99775d46aa43242f.json"]
+
+[dictionaries.local-types]
+values = ["movie", "other"]
+
+# Written by `fixtures.py setup`: one finished recording for the read and stop
+# routes, and several for the routes that delete one (a delete consumes it).
+[dictionaries.recordings-keep]
+from-file = "/report/stateful/recordings-keep.dict"
+
+[dictionaries.recordings-drop]
+from-file = "/report/stateful/recordings-drop.dict"
+
+# Recordings of /live.ts, which never ends: the only ones a stop can succeed on.
+[dictionaries.recordings-live]
+from-file = "/report/stateful/recordings-live.dict"
+
+# --- Archive -------------------------------------------------------------------------
+
+[[operations]]
+include-path-regex = '^/zip/create'
+
+[operations.parameters]
+lz = { dictionary = "lz-zip", probability = 0.7 }
+"body.url" = { dictionary = "url-zip", probability = 1.0 }
+key = { dictionary = "archive-keys", probability = 0.9 }
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+include-path-regex = '^/tar/create'
+
+[operations.parameters]
+lz = { dictionary = "lz-tar", probability = 0.7 }
+"body.url" = { dictionary = "url-tar", probability = 1.0 }
+key = { dictionary = "archive-keys", probability = 0.9 }
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+include-path-regex = '^/tgz/create'
+
+[operations.parameters]
+lz = { dictionary = "lz-tgz", probability = 0.7 }
+"body.url" = { dictionary = "url-tgz", probability = 1.0 }
+key = { dictionary = "archive-keys", probability = 0.9 }
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+include-path-regex = '^/7zip/create'
+
+[operations.parameters]
+lz = { dictionary = "lz-7zip", probability = 0.7 }
+"body.url" = { dictionary = "url-7zip", probability = 1.0 }
+key = { dictionary = "archive-keys", probability = 0.9 }
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+include-path-regex = '^/rar/create'
+
+[operations.parameters]
+lz = { dictionary = "lz-rar", probability = 0.7 }
+"body.url" = { dictionary = "url-rar", probability = 1.0 }
+key = { dictionary = "archive-keys", probability = 0.9 }
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+include-path-regex = '^/\{archiveType\}/stream'
+
+[operations.parameters]
+key = { dictionary = "archive-keys", probability = 0.8 }
+file = { dictionary = "archive-entries", probability = 0.8 }
+
+# --- NZB -----------------------------------------------------------------------------
+
+[[operations]]
+include-path-regex = '^/nzb/'
+
+[operations.parameters]
+lz = { dictionary = "lz-nzb", probability = 0.7 }
+"body.nzbUrl" = { dictionary = "nzb-urls", probability = 1.0 }
+key = { dictionary = "nzb-keys", probability = 0.8 }
+file = { dictionary = "nzb-files", probability = 0.8 }
+
+[operations.checks.not_a_server_error]
+# 501: a GET without ?lz= (use POST); 502: the NZB or its server is unreachable.
+expected-statuses = ["2xx", "3xx", "4xx", "501", "502"]
+
+# --- DVR -----------------------------------------------------------------------------
+
+[[operations]]
+include-name-regex = '^GET /api/recordings/\{id\}(/(download|stream))?$'
+
+[operations.parameters]
+id = { dictionary = "recordings-keep", probability = 0.7 }
+
+[[operations]]
+# Only a recording that is still running can be stopped; a stop consumes it.
+include-name-regex = '^(POST /api/recordings/\{id\}/stop|GET /record/stop/\{id\})$'
+
+[operations.parameters]
+id = { dictionary = "recordings-live", probability = 0.7 }
+
+[[operations]]
+include-name-regex = '^(DELETE /api/recordings/\{id\}|GET /api/recordings/\{id\}/delete)$'
+
+[operations.parameters]
+id = { dictionary = "recordings-drop", probability = 0.7 }
+
+[[operations]]
+# Deleting by status would take the fixture recordings with it; "failed" matches none.
+include-name-regex = '^DELETE /api/recordings(/all)?$'
+
+[operations.parameters]
+status = "failed"
+
+[[operations]]
+include-name = "POST /api/recordings/start"
+
+[operations.parameters]
+"body.url" = { dictionary = "record-urls", probability = 1.0 }
+
+[[operations]]
+include-name = "GET /record"
+
+[operations.parameters]
+url = { dictionary = "record-urls", probability = 1.0 }
+
+# --- HLS and media -------------------------------------------------------------------
+
+[[operations]]
+include-path-regex = '^/hlsv2/'
+
+[operations.parameters]
+id = { dictionary = "hls-ids", probability = 0.8 }
+mediaURL = { dictionary = "media-urls", probability = 1.0 }
+file = { dictionary = "hls-files", probability = 0.8 }
+
+[[operations]]
+include-name = "GET /probe"
+
+[operations.parameters]
+url = { dictionary = "media-urls", probability = 1.0 }
+
+# --- Local files add-on --------------------------------------------------------------
+
+[[operations]]
+include-name = "GET /local-addon/file/{hash}"
+
+[operations.parameters]
+hash = { dictionary = "local-hashes", probability = 0.8 }
+
+[[operations]]
+include-name-regex = '^GET /local-addon/(catalog|meta|stream)/'
+
+[operations.parameters]
+type = { dictionary = "local-types", probability = 0.8 }
+id = { dictionary = "local-ids", probability = 0.8 }

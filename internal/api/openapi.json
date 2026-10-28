@@ -6976,7 +6976,7 @@
         "tags": [
           "Media"
         ],
-        "description": "`ext` is any string: `vtt` yields WebVTT (`text/vtt; charset=utf-8`), anything else yields SRT (`text/plain; charset=utf-8`). Cue times are shifted by `offset` ms (clamped to >=0; a non-integer `offset` is treated as 0). When the subtitle cannot be fetched/validated the headers are already set and the handler returns without writing, so the client gets **200 with an empty body** (no error status).",
+        "description": "`ext` is any string: `vtt` yields WebVTT (`text/vtt; charset=utf-8`), anything else yields SRT (`text/plain; charset=utf-8`). Cue times are shifted by `offset` ms (clamped to >=0; a non-integer `offset` is treated as 0). The conversion is buffered: when the subtitle cannot be fetched/validated the response is a JSON `{\"error\":…}` with 400 (bad source URL), 404 (source answered 404/410) or 502 (any other fetch failure), never a 200 with an empty body.",
         "parameters": [
           {
             "name": "ext",
@@ -7016,7 +7016,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Converted subtitles (empty body on fetch failure)",
+            "description": "Converted subtitles",
             "headers": {
               "Content-Security-Policy": {
                 "schema": {
@@ -7038,6 +7038,36 @@
               "text/plain": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The subtitle source URL is missing, malformed, not http(s) or points at a refused (private) host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorJSON"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The subtitle source answered 404/410",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorJSON"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The subtitle source could not be fetched (network error or any other non-2xx upstream status)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorJSON"
                 }
               }
             }
@@ -7926,7 +7956,7 @@
         "tags": [
           "Media"
         ],
-        "description": "`url` is the percent-encoded media URL; the remainder of the path after `/tracks/` is joined with `/` and unescaped, so it may contain slashes. A scheme-less value is a path on this server's own origin. Never fails: any error (invalid/blocked URL, ffprobe failure) yields `200 []`.",
+        "description": "`url` is the percent-encoded media URL; the remainder of the path after `/tracks/` is joined with `/` and unescaped, so it may contain slashes. A scheme-less value is a path on this server's own origin. An invalid or blocked URL (bad scheme, private/loopback host) is `400 {\"error\"}`; any other failure (ffprobe error/timeout) is `500 {\"error\"}`. stremio-video's tracksData.js treats any non-array response as \"no extra tracks\".",
         "parameters": [
           {
             "name": "url",
@@ -7940,7 +7970,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Non-video streams (empty array on error)",
+            "description": "Non-video streams",
             "content": {
               "application/json": {
                 "schema": {
@@ -7952,8 +7982,32 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid or blocked media URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {"error": {"type": "string"}}
+                }
+              }
+            }
+          },
           "403": {
             "$ref": "#/components/responses/ForbiddenOrigin"
+          },
+          "500": {
+            "description": "ffprobe failure or timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {"error": {"type": "string"}}
+                }
+              }
+            }
           }
         }
       }
@@ -8591,7 +8645,7 @@
       "get": {
         "operationId": "archiveStreamEntry",
         "summary": "Stream an entry from an archive session",
-        "description": "Serves the entry with HTTP Range support: stored zip/tar entries are served in place, everything else is extracted once in the background and served while it grows. An entry name that is not in the archive (or whose extraction fails) answers 500, not 404. Only the GET method is meaningful.",
+        "description": "Serves the entry with HTTP Range support: stored zip/tar entries are served in place, everything else is extracted once in the background and served while it grows. An entry name that is not in the archive answers 404; an entry that cannot be opened or extracted answers 500. Only the GET method is meaningful.",
         "tags": [
           "Archive"
         ],
@@ -8679,7 +8733,7 @@
             }
           },
           "404": {
-            "description": "`session not found`",
+            "description": "`session not found`, or the entry is not in the archive (`entry \"…\" not found in archive`)",
             "content": {
               "text/plain": {
                 "schema": {
@@ -8689,7 +8743,7 @@
             }
           },
           "500": {
-            "description": "Entry could not be opened or extracted (`extract: …`; also for an entry name that does not exist in the archive)",
+            "description": "Entry exists but could not be opened or extracted (`extract: …`)",
             "content": {
               "text/plain": {
                 "schema": {
@@ -9025,7 +9079,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Stats, or JSON `null` when no engine with that hash is active (not an error)",
+            "description": "Stats, or JSON `null` when no engine with that hash is active. By design (server.js parity), not 404: stremio-core deserializes this as `Option<Statistics>` and treats `null` as \"nothing to update\" while any non-2xx becomes an error state",
             "content": {
               "application/json": {
                 "schema": {
@@ -9427,7 +9481,7 @@
         ],
         "responses": {
           "200": {
-            "description": "WebVTT (`text/vtt; charset=utf-8`). The handler fetches `http://127.0.0.1:<port>/<infoHash>/<idx>` itself and ignores every fetch/parse error: on failure the body is EMPTY (not a valid WEBVTT document) yet status is still 200.",
+            "description": "WebVTT (`text/vtt; charset=utf-8`). The handler fetches `http://127.0.0.1:<port>/<infoHash>/<idx>` itself and converts it; a failure is reported with an error status (400/404/502, JSON `{\"error\":…}`), never as an empty 200.",
             "headers": {
               "X-Content-Type-Options": {
                 "schema": {
@@ -9448,18 +9502,43 @@
               }
             }
           },
-          "403": {
-            "$ref": "#/components/responses/ForbiddenOrigin"
+          "400": {
+            "description": "The subtitle source URL is missing, malformed, not http(s) or points at a refused (private) host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorJSON"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Not a valid info hash (the path matches no route: `404 page not found`)",
+            "description": "The subtitle source answered 404/410 (JSON error), or the first segment is not a valid info hash so the path matches no route (`404 page not found`, text/plain)",
             "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorJSON"
+                }
+              },
               "text/plain": {
                 "schema": {
                   "type": "string"
                 }
               }
             }
+          },
+          "502": {
+            "description": "The subtitle source could not be fetched (network error or any other non-2xx upstream status)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorJSON"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
           }
         }
       }

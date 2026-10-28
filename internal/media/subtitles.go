@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
 // SubtitlesTracks fetches the subtitle file at subsURL and parses it into cue
@@ -132,6 +134,12 @@ func fetchSubBytesCtx(parent context.Context, url, selfBase string) ([]byte, err
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	switch {
+	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusGone:
+		return nil, fmt.Errorf("subtitle fetch: upstream status %d: %w", resp.StatusCode, types.ErrSubtitleNotFound)
+	case resp.StatusCode < 200 || resp.StatusCode > 299:
+		return nil, fmt.Errorf("subtitle fetch: upstream status %d", resp.StatusCode)
+	}
 	return io.ReadAll(io.LimitReader(resp.Body, 25<<20))
 }
 

@@ -82,6 +82,8 @@ jobs:
           cd tools && go mod tidy -diff
       - name: dupl ratchet
         run: scripts/dup-check.sh
+      - name: deadcode gate
+        run: scripts/deadcode-check.sh
       - name: Build (CGO disabled)
         run: CGO_ENABLED=0 go build -v ./...
       - name: Test
