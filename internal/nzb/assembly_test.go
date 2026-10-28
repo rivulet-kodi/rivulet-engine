@@ -577,33 +577,6 @@ func TestAssembly_CancelStopsWorkersAndReleasesConnections(t *testing.T) {
 	}
 }
 
-func TestSession_CloseCancelsAssemblies(t *testing.T) {
-	tf := makeTestFile("movie.mkv", 8, 5_000, 0, 17)
-	srv := newFakeNNTP(t, tf.articles)
-	gate := make(chan struct{})
-	defer close(gate)
-	srv.setHook(func(id string) {
-		if id != tf.segID(0) {
-			<-gate
-		}
-	})
-	sess := NewSession(srv.cfg(2), []File{tf.file})
-	a, err := sess.StartAssembly(context.Background(), "movie.mkv", tempDst(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.WaitRange(shortCtx(t, 10*time.Second), 0, 10); err != nil {
-		t.Fatal(err)
-	}
-	if err := sess.Close(); err != nil {
-		t.Fatal(err)
-	}
-	waitDone(t, a)
-	if a.Err() == nil {
-		t.Fatal("Session.Close must cancel its assemblies")
-	}
-}
-
 func TestAssembly_ParentContextCancel(t *testing.T) {
 	tf := makeTestFile("movie.mkv", 8, 5_000, 0, 18)
 	srv := newFakeNNTP(t, tf.articles)
@@ -692,7 +665,7 @@ func TestAssembly_ReconnectsAfterDroppedConnection(t *testing.T) {
 
 // Articles without =ypart (not self-describing) cannot be placed
 // independently: the assembly falls back to ordered appends by one worker and
-// reports the size only at the end, like AssembleFile.
+// reports the size only at the end.
 func TestAssembly_SequentialFallbackWithoutYpart(t *testing.T) {
 	content := pseudoRandom(30_000, 22)
 	articles := map[string][]byte{}
@@ -753,7 +726,7 @@ func TestSelfDescribing(t *testing.T) {
 
 // A poster whose =ybegin size= is just the part size (not the file size) must
 // not be placed by its =ypart ranges: the assembly appends in order instead,
-// exactly like AssembleFile.
+// as a sequential assembly does.
 func TestAssembly_UntrustedPartHeadersFallBackToSequential(t *testing.T) {
 	content := pseudoRandom(30_000, 29)
 	articles := map[string][]byte{}
@@ -923,17 +896,18 @@ func TestAssembly_ParallelBeatsSerialLatency(t *testing.T) {
 	srv := newFakeNNTP(t, tf.articles)
 	srv.setLatency(latency)
 
+	// One connection fetches the articles one after another: the serial baseline.
 	sess := NewSession(srv.cfg(1), []File{tf.file})
 	t0 := time.Now()
-	var sink bytes.Buffer
-	if err := sess.AssembleFile("movie.mkv", &sink); err != nil {
+	sa, err := sess.StartAssembly(context.Background(), "movie.mkv", tempDst(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, sa)
+	if err := sa.Err(); err != nil {
 		t.Fatal(err)
 	}
 	serial := time.Since(t0)
-	_ = sess.Close()
-	if !bytes.Equal(sink.Bytes(), tf.content) {
-		t.Fatal("serial content differs")
-	}
 
 	psess := NewSession(srv.cfg(conns), []File{tf.file})
 	dst := tempDst(t)
@@ -964,8 +938,8 @@ func TestAssembly_ParallelBeatsSerialLatency(t *testing.T) {
 	}
 }
 
-// BenchmarkAssemble compares the sequential AssembleFile with the parallel
-// Assembly under a per-article latency, reporting time-to-first-byte and total.
+// BenchmarkAssemble compares Assemblies of increasing connection counts (1 = serial)
+// under a per-article latency, reporting time-to-first-byte and total.
 func BenchmarkAssemble(b *testing.B) {
 	const (
 		nseg    = 32
@@ -975,23 +949,7 @@ func BenchmarkAssemble(b *testing.B) {
 	srv := newFakeNNTP(b, tf.articles)
 	srv.setLatency(latency)
 
-	b.Run("serial", func(b *testing.B) {
-		b.ReportAllocs()
-		var ttfb time.Duration
-		var iters int
-		for b.Loop() {
-			sess := NewSession(srv.cfg(1), []File{tf.file})
-			w := &firstWrite{t0: time.Now()}
-			if err := sess.AssembleFile("movie.mkv", w); err != nil {
-				b.Fatal(err)
-			}
-			ttfb += w.first
-			iters++
-			_ = sess.Close()
-		}
-		b.ReportMetric(float64(ttfb.Microseconds())/float64(iters), "ttfb-µs")
-	})
-	for _, conns := range []int{4, 8, 16} {
+	for _, conns := range []int{1, 4, 8, 16} {
 		b.Run(fmt.Sprintf("parallel-%d", conns), func(b *testing.B) {
 			b.ReportAllocs()
 			var ttfb time.Duration
@@ -1021,19 +979,4 @@ func BenchmarkAssemble(b *testing.B) {
 			b.ReportMetric(float64(ttfb.Microseconds())/float64(iters), "ttfb-µs")
 		})
 	}
-}
-
-// firstWrite records when the first byte reaches the sink.
-type firstWrite struct {
-	t0    time.Time
-	first time.Duration
-	seen  bool
-}
-
-func (w *firstWrite) Write(p []byte) (int, error) {
-	if !w.seen && len(p) > 0 {
-		w.seen = true
-		w.first = time.Since(w.t0)
-	}
-	return len(p), nil
 }

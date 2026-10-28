@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
+#
+# SPDX-License-Identifier: MIT
+
+# Allowlist for scripts/deadcode-check.sh. Format: "<file> <symbol> # reason".
+# deadcode only follows func main of the Go packages it loads; the
+# librivulet-engine cgo library (cmd/librivulet-engine) is entered from C
+# (//export), so what only it calls looks unreachable. Entries that no longer
+# match a finding make the check fail, so delete them with the code.
+
+internal/app/lookup.go MapLookup # used by cmd/librivulet-engine ServerStart (cgo library mode)

@@ -284,13 +284,6 @@ func (h *Handler) cacheLookup(rawurl string, hdr http.Header) ([]byte, http.Head
 	return entry.val, outHdr, entry.status, true
 }
 
-// cachedFetch fetches rawurl, using the segment cache when configured.
-// Returns body, response headers, HTTP status, and any error. When the
-// in-flight buffering budget is exhausted it waits (bounded by ctx).
-func (h *Handler) cachedFetch(ctx context.Context, rawurl string, hdr http.Header, proxyURL string) ([]byte, http.Header, int, error) {
-	return h.cachedFetchMode(ctx, rawurl, hdr, proxyURL, true)
-}
-
 // cachedFetchMode is cachedFetch with a choice of what happens when the
 // in-flight budget is exhausted: wait for it (wait == true) or give up with
 // errInflightBusy (best-effort callers such as prefetch).

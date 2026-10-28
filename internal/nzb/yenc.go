@@ -111,8 +111,10 @@ func parseYpart(line []byte, h *yencHeader) {
 // declares. Returning an error aborts the decode.
 type yencOpenFunc func(h yencHeader) (io.Writer, error)
 
-// DecodeYenc decodes a single-part yEnc-encoded article body from r and writes
-// the decoded bytes to w.
+// decodeYenc decodes a yEnc-encoded article body from r and writes the decoded
+// bytes to the writer chosen by open, which is invoked once the article's
+// =ybegin/=ypart headers are known. It returns the parsed header and the number
+// of decoded bytes written.
 //
 // yEnc encoding: each original byte b is stored as (b + 42) % 256. Four values
 // in the encoded stream (NUL, CR, LF, '=') must be further escaped: the escape
@@ -123,19 +125,11 @@ type yencOpenFunc func(h yencHeader) (io.Writer, error)
 // Line endings added by the encoder for line-length management are not part of
 // the original data and are discarded by the scanner.
 //
-// The article must be well-formed: DecodeYenc returns an error when no
+// The article must be well-formed: decodeYenc returns an error when no
 // =ybegin header or no =yend trailer is found (error text, other encodings,
 // truncated body), when the decoded length differs from the trailer's size=,
 // or when a pcrc32= (or, for single-part articles, crc32=) is present and does
 // not match. Callers rely on this so a bad article is never treated as data.
-func DecodeYenc(r io.Reader, w io.Writer) error {
-	_, _, err := decodeYenc(r, func(yencHeader) (io.Writer, error) { return w, nil })
-	return err
-}
-
-// decodeYenc is DecodeYenc with a caller-chosen destination: open is invoked
-// once the article's =ybegin/=ypart headers are known. It returns the parsed
-// header and the number of decoded bytes written.
 func decodeYenc(r io.Reader, open yencOpenFunc) (yencHeader, int64, error) {
 	st := yencPool.Get().(*yencState)
 	defer func() {

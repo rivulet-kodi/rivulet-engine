@@ -63,7 +63,7 @@ const (
 	layoutParallel
 	// layoutSequential: the articles are not self-describing; segments are
 	// appended in order by a single worker and the size is only known once the
-	// last one is written (the behaviour of AssembleFile).
+	// last one is written.
 	layoutSequential
 )
 
@@ -169,7 +169,6 @@ func (sess *Session) StartAssembly(ctx context.Context, name string, dst io.Writ
 
 	conns := workerCount(sess.cfg.Connections, n)
 	a.alive = conns
-	sess.track(a)
 	stopAfter := context.AfterFunc(actx, func() { a.fail(actx.Err()) })
 	a.wg.Add(conns)
 	for id := range conns {
@@ -179,25 +178,9 @@ func (sess *Session) StartAssembly(ctx context.Context, name string, dst io.Writ
 		a.wg.Wait()
 		stopAfter()
 		cancel()
-		sess.untrack(a)
 		close(a.done)
 	}()
 	return a, nil
-}
-
-func (sess *Session) track(a *Assembly) {
-	sess.asmMu.Lock()
-	defer sess.asmMu.Unlock()
-	if sess.asms == nil {
-		sess.asms = map[*Assembly]struct{}{}
-	}
-	sess.asms[a] = struct{}{}
-}
-
-func (sess *Session) untrack(a *Assembly) {
-	sess.asmMu.Lock()
-	defer sess.asmMu.Unlock()
-	delete(sess.asms, a)
 }
 
 // Cancel stops the download and closes its connections. Ranges that were
@@ -649,7 +632,7 @@ func (a *Assembly) openSegment(id, idx int, h yencHeader) (io.Writer, extent, er
 // multi-part file its part must start the file and leave room for the rest —
 // anything else (no =ypart, a size= that is just the part's size, a first
 // segment that is not the file's first bytes) is not trusted and falls back to
-// ordered appends, which is what AssembleFile has always done.
+// ordered appends.
 func selfDescribing(h yencHeader, nsegs int) bool {
 	if h.Size <= 0 {
 		return false

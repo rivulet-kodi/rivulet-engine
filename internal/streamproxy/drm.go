@@ -81,13 +81,6 @@ type drmBox struct {
 	Payload []byte // box body (after header)
 }
 
-// drmDecrypt dispatches segment decryption based on p.Method. It never
-// modifies segment: the plaintext is a separate buffer (Method "" returns
-// segment itself).
-func drmDecrypt(h *Handler, p DecryptParams, segment []byte) ([]byte, error) {
-	return drmDecryptBuf(h, p, segment, false)
-}
-
 // drmDecryptInPlace is drmDecrypt for a caller that owns segment and no
 // longer needs the ciphertext: it decrypts inside segment's own backing array
 // instead of allocating a full-size copy. The returned slice aliases segment
@@ -130,12 +123,6 @@ func drmDecryptBuf(_ *Handler, p DecryptParams, segment []byte, inPlace bool) ([
 	default:
 		return nil, fmt.Errorf("unsupported decryption method %q", p.Method)
 	}
-}
-
-// drmDecryptCBC decrypts a full HLS segment using AES-128-CBC and strips PKCS7
-// padding. data is left untouched.
-func drmDecryptCBC(key, iv, data []byte) ([]byte, error) {
-	return drmCBC(key, iv, data, false)
 }
 
 // drmCBC is drmDecryptCBC with the option to decrypt inside data itself.

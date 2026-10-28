@@ -39,7 +39,7 @@ type ServerConfig struct {
 	// open for one file (the server's allowed connection count). Values <= 0
 	// select defaultConnections; the effective value is capped at
 	// maxConnections. Extra connections the server refuses are tolerated —
-	// the assembly just runs with fewer. Dial and AssembleFile use one.
+	// the assembly just runs with fewer.
 	Connections int
 	// Control, when set, is passed as the net.Dialer.Control hook for the
 	// TCP dial (and, for SSL, the TLS handshake's underlying TCP dial),
@@ -63,16 +63,12 @@ func containsCRLF(s string) bool {
 	return strings.ContainsAny(s, "\r\n")
 }
 
-// Dial opens a TCP (or TLS) connection to the NNTP server described by cfg,
-// performs the initial handshake, and authenticates when credentials are set.
-// Default ports: 119 (plain), 563 (SSL) when cfg.Port == 0.
+// DialContext opens a TCP (or TLS) connection to the NNTP server described by
+// cfg, performs the initial handshake, and authenticates when credentials are
+// set. Default ports: 119 (plain), 563 (SSL) when cfg.Port == 0.
 // A 30 s dial timeout and 60 s per-operation deadlines are enforced.
-func Dial(cfg ServerConfig) (*Client, error) {
-	return DialContext(context.Background(), cfg)
-}
-
-// DialContext is Dial with cancellation: cancelling ctx aborts a dial or
-// handshake in progress (the connection is closed, the error is returned).
+// Cancelling ctx aborts a dial or handshake in progress (the connection is
+// closed, the error is returned).
 func DialContext(ctx context.Context, cfg ServerConfig) (*Client, error) {
 	port := cfg.Port
 	if port == 0 {

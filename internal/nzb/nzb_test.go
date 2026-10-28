@@ -89,7 +89,7 @@ func TestParse_Empty(t *testing.T) {
 	}
 }
 
-// ---- DecodeYenc tests ------------------------------------------------------
+// ---- decodeYenc tests ------------------------------------------------------
 
 // buildYenc constructs a minimal yEnc-encoded block for a slice of bytes.
 // Bytes that would become NUL, CR, LF, or '=' in the encoded form are escaped.
@@ -138,8 +138,8 @@ func TestDecodeYenc_RoundTrip(t *testing.T) {
 	encoded := buildYenc(original)
 
 	var out bytes.Buffer
-	if err := DecodeYenc(bytes.NewReader(encoded), &out); err != nil {
-		t.Fatalf("DecodeYenc: %v", err)
+	if err := decodeYencTo(bytes.NewReader(encoded), &out); err != nil {
+		t.Fatalf("decodeYenc: %v", err)
 	}
 	if !bytes.Equal(out.Bytes(), original) {
 		t.Errorf("decoded %v, want %v", out.Bytes(), original)
@@ -155,8 +155,8 @@ func TestDecodeYenc_WithEscapedBytes(t *testing.T) {
 	encoded := buildYenc(original)
 
 	var out bytes.Buffer
-	if err := DecodeYenc(bytes.NewReader(encoded), &out); err != nil {
-		t.Fatalf("DecodeYenc: %v", err)
+	if err := decodeYencTo(bytes.NewReader(encoded), &out); err != nil {
+		t.Fatalf("decodeYenc: %v", err)
 	}
 	if !bytes.Equal(out.Bytes(), original) {
 		t.Errorf("decoded %v, want %v", out.Bytes(), original)
@@ -164,7 +164,7 @@ func TestDecodeYenc_WithEscapedBytes(t *testing.T) {
 }
 
 func TestDecodeYenc_AllBytesRoundTrip(t *testing.T) {
-	// Full 0–255 round-trip via buildYenc + DecodeYenc.
+	// Full 0–255 round-trip via buildYenc + decodeYenc.
 	original := make([]byte, 256)
 	for i := range original {
 		original[i] = byte(i)
@@ -172,8 +172,8 @@ func TestDecodeYenc_AllBytesRoundTrip(t *testing.T) {
 	encoded := buildYenc(original)
 
 	var out bytes.Buffer
-	if err := DecodeYenc(bytes.NewReader(encoded), &out); err != nil {
-		t.Fatalf("DecodeYenc: %v", err)
+	if err := decodeYencTo(bytes.NewReader(encoded), &out); err != nil {
+		t.Fatalf("decodeYenc: %v", err)
 	}
 	if !bytes.Equal(out.Bytes(), original) {
 		// Show first diff
@@ -189,7 +189,7 @@ func TestDecodeYenc_AllBytesRoundTrip(t *testing.T) {
 func TestDecodeYenc_NoYbegin(t *testing.T) {
 	// Without =ybegin the article is not yEnc: must be an error, no output.
 	var out bytes.Buffer
-	err := DecodeYenc(bytes.NewReader([]byte("some random line\n")), &out)
+	err := decodeYencTo(bytes.NewReader([]byte("some random line\n")), &out)
 	if err == nil {
 		t.Fatal("expected error for article without =ybegin")
 	}

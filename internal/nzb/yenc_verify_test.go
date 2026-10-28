@@ -6,8 +6,10 @@ package nzb
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"strings"
 	"testing"
 )
@@ -30,7 +32,7 @@ func TestDecodeYenc_RejectsMalformed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := DecodeYenc(strings.NewReader(tc.input), &out); err == nil {
+			if err := decodeYencTo(strings.NewReader(tc.input), &out); err == nil {
 				t.Fatalf("expected error, got nil (output %v)", out.Bytes())
 			}
 		})
@@ -50,7 +52,7 @@ func TestDecodeYenc_AcceptsMatchingCRC(t *testing.T) {
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := DecodeYenc(strings.NewReader(in), &out); err != nil {
+			if err := decodeYencTo(strings.NewReader(in), &out); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if !bytes.Equal(out.Bytes(), want) {
@@ -58,4 +60,15 @@ func TestDecodeYenc_AcceptsMatchingCRC(t *testing.T) {
 			}
 		})
 	}
+}
+
+// decodeYencTo decodes a single-part article from r into w.
+func decodeYencTo(r io.Reader, w io.Writer) error {
+	_, _, err := decodeYenc(r, func(yencHeader) (io.Writer, error) { return w, nil })
+	return err
+}
+
+// dial is DialContext with a background context.
+func dial(cfg ServerConfig) (*Client, error) {
+	return DialContext(context.Background(), cfg)
 }
