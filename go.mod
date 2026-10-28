@@ -8,7 +8,7 @@ go 1.27.3
 
 require (
 	github.com/anacrolix/dht/v2 v2.24.1-0.20260908044610-a669bdd3bdcf
-	github.com/anacrolix/torrent v1.61.1-0.20260927071845-d913b30f520e
+	github.com/anacrolix/torrent v1.61.1-0.20261024051421-5f95cd33fd29
 	github.com/bodgit/sevenzip v1.6.5
 	github.com/coder/websocket v1.8.15
 	github.com/daku10/go-lz-string v0.0.7
