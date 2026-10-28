@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
+#
+# SPDX-License-Identifier: MIT
+
+# zizmor runs with its default audits; there are no documented exceptions.
+# Add `rules.<audit>.ignore` entries here, each with a reason, if one is needed.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin

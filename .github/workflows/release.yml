@@ -15,7 +15,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,11 +30,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # no caches in a publishing workflow (cache poisoning)
       - run: CGO_ENABLED=0 go build -v ./...
       - run: go test -p 1 ./...
 
@@ -43,15 +44,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: validate
+    permissions:
+      contents: write # create the GitHub release and upload assets
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # no caches in a publishing workflow (cache poisoning)
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
       - name: Locate the Android NDK cross-compilers
@@ -81,14 +85,16 @@ jobs:
                       i686-linux-android21-clang++; do
             test -x "$bin/$tool" || { echo "missing NDK tool: $bin/$tool"; exit 1; }
           done
-          echo "ANDROID_ARM_CC=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
-          echo "ANDROID_ARM_CXX=$bin/armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
-          echo "ANDROID_ARM64_CC=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
-          echo "ANDROID_ARM64_CXX=$bin/aarch64-linux-android21-clang++" >> "$GITHUB_ENV"
-          echo "ANDROID_AMD64_CC=$bin/x86_64-linux-android21-clang" >> "$GITHUB_ENV"
-          echo "ANDROID_AMD64_CXX=$bin/x86_64-linux-android21-clang++" >> "$GITHUB_ENV"
-          echo "ANDROID_386_CC=$bin/i686-linux-android21-clang" >> "$GITHUB_ENV"
-          echo "ANDROID_386_CXX=$bin/i686-linux-android21-clang++" >> "$GITHUB_ENV"
+          {
+            echo "ANDROID_ARM_CC=$bin/armv7a-linux-androideabi21-clang"
+            echo "ANDROID_ARM_CXX=$bin/armv7a-linux-androideabi21-clang++"
+            echo "ANDROID_ARM64_CC=$bin/aarch64-linux-android21-clang"
+            echo "ANDROID_ARM64_CXX=$bin/aarch64-linux-android21-clang++"
+            echo "ANDROID_AMD64_CC=$bin/x86_64-linux-android21-clang"
+            echo "ANDROID_AMD64_CXX=$bin/x86_64-linux-android21-clang++"
+            echo "ANDROID_386_CC=$bin/i686-linux-android21-clang"
+            echo "ANDROID_386_CXX=$bin/i686-linux-android21-clang++"
+          } >> "$GITHUB_ENV"
       - name: Install syft (for goreleaser SBOMs)
         uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
