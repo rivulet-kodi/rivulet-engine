@@ -15,10 +15,14 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+
+env:
+  # Not tracked by Dependabot; bump by hand (also in scheduled-scan.yml).
+  TRIVY_VERSION: "v0.76.1"
 
 jobs:
   quality:
@@ -27,10 +31,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
       - name: gofmt
         run: |
           unformatted="$(gofmt -s -l . || true)"
@@ -57,11 +66,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
       - run: go mod verify
+      - name: go mod tidy (verify no drift)
+        run: |
+          go mod tidy -diff
+          cd tools && go mod tidy -diff
+      - name: dupl ratchet
+        run: scripts/dup-check.sh
       - name: Build (CGO disabled)
         run: CGO_ENABLED=0 go build -v ./...
       - name: Test
@@ -80,10 +100,15 @@ jobs:
       # Check out with LF endings so fixtures and golden files match Linux.
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
       # No -race: it needs cgo and a mingw toolchain, and the Linux job
       # already covers races. This job catches Windows-specific file
       # handling (open handles, permissions, paths).
@@ -117,32 +142,41 @@ jobs:
           - { goos: android, goarch: "386", ldextra: "-checklinkname=0", cgo: "1", ndk: true, ndkabi: "i686-linux-android" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
       - name: Locate the Android NDK cross-compiler
         if: matrix.ndk
         # Uses the NDK preinstalled on the runner image; see the same step in
         # release.yml for why a fetched-and-cached NDK is not trustworthy here.
+        env:
+          NDKABI: ${{ matrix.ndkabi }}
         run: |
           bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           for tool in clang clang++ \
-                      ${{ matrix.ndkabi }}21-clang \
-                      ${{ matrix.ndkabi }}21-clang++; do
+                      ${NDKABI}21-clang \
+                      ${NDKABI}21-clang++; do
             test -x "$bin/$tool" || { echo "missing NDK tool: $bin/$tool"; exit 1; }
           done
-          echo "CC=$bin/${{ matrix.ndkabi }}21-clang" >> "$GITHUB_ENV"
-          echo "CXX=$bin/${{ matrix.ndkabi }}21-clang++" >> "$GITHUB_ENV"
+          echo "CC=$bin/${NDKABI}21-clang" >> "$GITHUB_ENV"
+          echo "CXX=$bin/${NDKABI}21-clang++" >> "$GITHUB_ENV"
       - name: Build
         env:
           CGO_ENABLED: ${{ matrix.cgo || '0' }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
+          MATRIX_EXT: ${{ matrix.ext }}
+          MATRIX_LDEXTRA: ${{ matrix.ldextra }}
         run: |
-          out="dist/rivulet-engine_${GOOS}_${GOARCH}${{ matrix.ext }}"
-          ldflags="-s -w ${{ matrix.ldextra }} -X main.buildVersion=${GITHUB_REF_NAME} -X main.buildCommit=${GITHUB_SHA::8}"
+          out="dist/rivulet-engine_${GOOS}_${GOARCH}${MATRIX_EXT}"
+          ldflags="-s -w ${MATRIX_LDEXTRA} -X main.buildVersion=${GITHUB_REF_NAME} -X main.buildCommit=${GITHUB_SHA::8}"
           if [ "$CGO_ENABLED" = "1" ]; then
             ldflags="$ldflags -linkmode=external -extldflags \"-pie -lm -static-libstdc++\""
           fi
@@ -160,12 +194,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
-      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
-      - run: govulncheck ./...
+          cache-dependency-path: |
+            go.sum
+            tools/go.sum
+      - run: go tool -modfile=tools/go.mod govulncheck ./...
 
   docker:
     name: Docker build & smoke test
@@ -173,20 +211,130 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build image
         run: docker build -t rivulet-engine:ci .
       - name: Smoke test (/heartbeat + healthcheck)
         run: |
           cid="$(docker run -d -p 11470:11470 rivulet-engine:ci)"
           trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null' EXIT
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:11470/heartbeat; then ok=1; break; fi
             sleep 1
           done
           test "${ok:-0}" = 1
-          for i in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             s="$(docker inspect -f '{{.State.Health.Status}}' "$cid")"
             [ "$s" = healthy ] && exit 0
             sleep 3
           done
           echo "container not healthy: $s"; exit 1
+
+  workflow-lint:
+    name: Workflow lint (actionlint + zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: tools/go.sum
+      - name: actionlint
+        run: go tool -modfile=tools/go.mod actionlint -color
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+        with:
+          advanced-security: false
+          annotations: true
+
+  dependency-review:
+    name: Dependency review
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
+  # Report-only: findings land in code scanning, nothing gates the build yet.
+  trivy:
+    name: Trivy (image + fs + config)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    env:
+      # Fork PRs and Dependabot runs get a read-only token: scan, skip the upload.
+      CAN_UPLOAD_SARIF: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build image
+        run: docker build -t rivulet-engine:ci .
+      - name: Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: rivulet-engine:ci
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          limit-severities-for-sarif: true
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: "0"
+      - name: Upload image SARIF
+        if: ${{ !cancelled() && env.CAN_UPLOAD_SARIF == 'true' }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+      - name: Trivy fs scan (SARIF)
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          limit-severities-for-sarif: true
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: "0"
+      - name: Upload fs SARIF
+        if: ${{ !cancelled() && env.CAN_UPLOAD_SARIF == 'true' }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Trivy config scan (SARIF)
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          format: sarif
+          output: trivy-config.sarif
+          exit-code: "0"
+      - name: Upload config SARIF
+        if: ${{ !cancelled() && env.CAN_UPLOAD_SARIF == 'true' }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config

@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
+#
+# SPDX-License-Identifier: MIT
+
+# Re-scans the *published* images so new CVEs in already-released images are
+# noticed even when nothing changes in the repository.
+name: Scheduled image scan
+
+on:
+  schedule:
+    - cron: "41 3 * * 1" # weekly, Monday 03:41 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: scheduled-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_VERSION: "v0.76.1"
+
+jobs:
+  targets:
+    name: resolve image tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Latest stable semver tag (v1.2.3 -> image tag 1.2.3); image tags have no "v" prefix.
+          tag=$(gh api --paginate "repos/${REPO}/tags" --jq '.[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)
+          if [ -n "$tag" ]; then
+            tags=$(jq -cn --arg v "${tag#v}" '["latest", $v] | unique')
+          else
+            tags='["latest"]'
+          fi
+          echo "matrix={\"tag\":${tags}}" >> "$GITHUB_OUTPUT"
+          echo "scanning tags: ${tags}"
+
+  scan:
+    name: scan (${{ matrix.tag }})
+    needs: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    steps:
+      # Image names are lower-case; github.repository may not be.
+      - name: Resolve image name
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "IMAGE=ghcr.io/${REPO,,}" >> "$GITHUB_ENV"
+
+      - name: Trivy scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: ${{ env.IMAGE }}:${{ matrix.tag }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          limit-severities-for-sarif: true
+          format: sarif
+          output: trivy-published.sarif
+          exit-code: "0"
+
+      - name: Upload SARIF
+        if: ${{ !cancelled() }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-published.sarif
+          category: trivy-published-${{ matrix.tag }}
+
+      - name: Trivy gate (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: ${{ env.IMAGE }}:${{ matrix.tag }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
