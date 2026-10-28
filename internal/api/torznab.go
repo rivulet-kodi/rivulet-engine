@@ -187,13 +187,6 @@ func tnItemSize(item tnItem) int64 {
 // ---- Dispatch -------------------------------------------------------------
 
 // handleTorznab dispatches all /torznab/* routes.
-//
-// @Summary  Torznab indexer Stremio add-on (manifest/stream)
-// @Tags     TorznabAddon
-// @Produce  json
-// @Success  200  {object}  map[string]interface{}
-// @Router   /torznab/manifest.json [get]
-// @Router   /torznab/stream/{type}/{id}.json [get]
 func (s *server) handleTorznab(w http.ResponseWriter, r *http.Request, seg []string) {
 	if len(seg) < 2 {
 		http.NotFound(w, r)

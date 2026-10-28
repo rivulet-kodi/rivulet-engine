@@ -325,16 +325,6 @@ func validateGenerateRequest(endpoint string, params map[string]string, expirySe
 }
 
 // HandleGenerateURL handles POST /generate_url and returns a signed token URL.
-//
-// @Summary  Generate a signed, expiring proxy URL
-// @Tags     Proxy
-// @Accept   json
-// @Produce  json
-// @Param    body  body  object  true  "{endpoint, params, expiry_seconds, ip}"
-// @Success  200  {object}  map[string]interface{}  "{url, expires_at}"
-// @Failure  400
-// @Failure  401
-// @Router   /generate_url [post]
 func (h *Handler) HandleGenerateURL(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorize(r); err != nil {
 		writeAuthError(w, err)
@@ -388,15 +378,6 @@ func (h *Handler) HandleGenerateURL(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleBase64 handles /base64/encode and /base64/check.
-//
-// @Summary  Encode a string to base64url, or check/decode a base64 string
-// @Tags     Proxy
-// @Produce  json
-// @Param    action  path   string  true   "encode or check"
-// @Param    d       query  string  false  "string to encode, or candidate base64 string to check"
-// @Success  200  {object}  map[string]interface{}  "{encoded_url} for encode; {is_base64, decoded} for check"
-// @Failure  404
-// @Router   /base64/{action} [get]
 func (h *Handler) HandleBase64(w http.ResponseWriter, r *http.Request, seg []string) {
 	if len(seg) < 2 {
 		http.NotFound(w, r)

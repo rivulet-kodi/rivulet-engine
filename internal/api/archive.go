@@ -1846,22 +1846,6 @@ func (s *server) handleArchive(w http.ResponseWriter, r *http.Request, seg []str
 //
 // An equivalent create for a key whose session is still usable reuses that
 // session (no download, no extraction) — see the package comment.
-//
-// @Summary  Create an archive streaming session (zip/rar/7zip/tar/tgz)
-// @Tags     Archive
-// @Accept   json
-// @Produce  json
-// @Param    archiveType  path   string  true   "archive format: zip, rar, 7zip, tar, or tgz"
-// @Param    key          path   string  false  "caller-supplied session key"
-// @Param    lz           query  string  false  "lz-string encoded JSON payload (url/fileIdx/fileMustInclude)"
-// @Success  200  {object}  map[string]string  "session key"
-// @Success  307  "redirect to the stream URL (GET)"
-// @Failure  400
-// @Failure  404
-// @Router   /{archiveType}/create [get]
-// @Router   /{archiveType}/create [post]
-// @Router   /{archiveType}/create/{key} [get]
-// @Router   /{archiveType}/create/{key} [post]
 func (s *server) archiveHandleCreate(w http.ResponseWriter, r *http.Request, seg []string, ext, key string) {
 	payload, err := archiveParsePayload(r)
 	if err != nil {
@@ -2219,18 +2203,6 @@ func archiveBuildSession(ext, key, sig string, payload *archivePayload, source s
 }
 
 // archiveHandleStream processes /{ext}/stream[/{key}[/{file…}]].
-// @Summary  Stream a file from an archive session
-// @Tags     Archive
-// @Produce  application/octet-stream
-// @Param    archiveType  path    string  true   "archive format: zip, rar, 7zip, tar, or tgz"
-// @Param    key          path    string  true   "session key"
-// @Param    file         path    string  false  "file path within the archive"
-// @Param    Range        header  string  false  "byte range (RFC 7233)"
-// @Success  200
-// @Success  206  {string}  string  "partial content"
-// @Success  307  "redirect to the canonical file URL"
-// @Failure  404
-// @Router   /{archiveType}/stream/{key}/{file} [get]
 func (s *server) archiveHandleStream(w http.ResponseWriter, r *http.Request, seg []string, ext string) {
 	// /{ext}/stream?key=…&file=…
 	if len(seg) == 2 {

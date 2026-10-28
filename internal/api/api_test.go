@@ -174,12 +174,28 @@ type fakeProber struct {
 	startHLSErr error
 	lastHLSOpts types.HLSSessionOptions
 	hlsFileErr  error // returned by HLSFile when set
+	probeErr    error // returned by Probe/OpenSubHash/SubtitlesTracks when set
 }
 
-func (p *fakeProber) Probe(_ string) (any, error)                          { return map[string]any{}, nil }
-func (p *fakeProber) Tracks(_ string) (any, error)                         { return []any{}, nil }
-func (p *fakeProber) OpenSubHash(_ string) (any, error)                    { return "abc123", nil }
-func (p *fakeProber) SubtitlesTracks(_ string) (any, error)                { return []any{}, nil }
+func (p *fakeProber) Probe(_ string) (any, error) {
+	if p.probeErr != nil {
+		return nil, p.probeErr
+	}
+	return map[string]any{}, nil
+}
+func (p *fakeProber) Tracks(_ string) (any, error) { return []any{}, nil }
+func (p *fakeProber) OpenSubHash(_ string) (any, error) {
+	if p.probeErr != nil {
+		return nil, p.probeErr
+	}
+	return "abc123", nil
+}
+func (p *fakeProber) SubtitlesTracks(_ string) (any, error) {
+	if p.probeErr != nil {
+		return nil, p.probeErr
+	}
+	return []any{}, nil
+}
 func (p *fakeProber) WriteSubtitles(_ io.Writer, _, _ string, _ int) error { return nil }
 func (p *fakeProber) StartHLS(_, _ string, opts types.HLSSessionOptions) (string, error) {
 	p.lastHLSOpts = opts

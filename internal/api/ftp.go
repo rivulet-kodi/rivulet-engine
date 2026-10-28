@@ -62,18 +62,6 @@ func ftpDLNAHeaders(h http.Header) {
 //	GET|POST /ftp/create/{key}
 //	GET|POST /ftp/stream
 //	GET|POST /ftp/stream/{key}/{file...}
-//
-// @Summary  Stream a remote FTP, FTPS, or HTTP(S) file
-// @Tags     Streaming
-// @Param    filename  path   string  true   "media filename for MIME-type detection"
-// @Param    lz        query  string  true   "lz-string encoded {\"ftpUrl\":\"...\"}"
-// @Param    Range     header string  false  "byte range (RFC 7233)"
-// @Success  200  {string}  string  "full streaming content"
-// @Success  206  {string}  string  "partial content"
-// @Failure  400
-// @Failure  501
-// @Failure  502
-// @Router   /ftp/{filename} [get]
 func (s *server) handleFTP(w http.ResponseWriter, r *http.Request, seg []string) {
 	// seg[0] == "ftp"; seg[1] is the next path component (if present).
 	if len(seg) >= 2 && (seg[1] == "create" || seg[1] == "stream") {

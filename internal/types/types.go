@@ -354,6 +354,12 @@ type HLSSessionOptions struct {
 // maps it to 400 Bad Request (every other StartHLS error stays a 500).
 var ErrInvalidHLSOption = errors.New("invalid HLS session option")
 
+// ErrInvalidMediaURL is matched (errors.Is) by MediaProber errors caused by a
+// media URL the caller supplied: empty, malformed, a non-http(s) scheme, a
+// refused (private/self-origin) target or an unresolvable host. The API layer
+// maps it to 400 Bad Request.
+var ErrInvalidMediaURL = errors.New("invalid media URL")
+
 // MediaProber backs the ffmpeg-based helper routes. Implementations shell out
 // to ffprobe/ffmpeg. Methods return values that are JSON-encoded verbatim.
 type MediaProber interface {

@@ -51,18 +51,6 @@ var mediaflowEndpointName = map[string]string{
 }
 
 // HandleExtractor handles GET /extractor/video[.m3u8|.mp4].
-//
-// @Summary  Resolve a hoster page into a proxied stream (MediaFlow-compatible)
-// @Tags     Proxy
-// @Param    host             query string true  "extractor name from extractors.json"
-// @Param    d                query string true  "page URL (plain or base64)"
-// @Param    redirect_stream  query bool   false "302 to the proxy URL instead of JSON"
-// @Success  200
-// @Success  302
-// @Failure  400
-// @Failure  401
-// @Failure  502
-// @Router   /extractor/video [get]
 func (h *Handler) HandleExtractor(w http.ResponseWriter, r *http.Request, seg []string) {
 	if len(seg) < 2 || strings.TrimSuffix(strings.TrimSuffix(seg[1], ".m3u8"), ".mp4") != "video" {
 		http.NotFound(w, r)

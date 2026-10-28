@@ -20,14 +20,6 @@ import (
 )
 
 // handleGetHTTPS handles GET /get-https?authKey=..&ipAddress=..
-//
-// @Summary  Provision a TLS cert from api.strem.io
-// @Tags     System
-// @Param    ipAddress  query  string  true   "public IP"
-// @Param    authKey    query  string  false  "Stremio auth key (or X-Stremio-AuthKey header)"
-// @Success  200  {object}  map[string]interface{}
-// @Failure  400
-// @Router   /get-https [get]
 func (s *server) handleGetHTTPS(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	ipAddress := q.Get("ipAddress")

@@ -180,20 +180,6 @@ const (
 )
 
 // handleCasting dispatches /casting, /casting/:id, /casting/:id/player[/:cmd].
-//
-// @Summary  Discover DLNA renderers
-// @Tags     Casting
-// @Produce  json
-// @Success  200  {array}   object
-// @Router   /casting [get]
-//
-// @Summary  Get a discovered DLNA renderer by id
-// @Tags     Casting
-// @Produce  json
-// @Param    id  path  string  true  "device id (USN/UDN)"
-// @Success  200  {object}  object
-// @Failure  404
-// @Router   /casting/{id} [get]
 func (s *server) handleCasting(w http.ResponseWriter, r *http.Request, seg []string) {
 	// DLNA is opt-in (RIVULET_ENABLE_DLNA). When disabled, advertise no devices
 	// so clients show nothing castable, and 404 any device/control sub-route — no
@@ -246,15 +232,6 @@ func (s *server) handleCasting(w http.ResponseWriter, r *http.Request, seg []str
 //   - Param inference: ?source=… → load (null → stop), ?stop=1 → stop, ?paused=true → pause, ?time=N → seek
 //
 // All AVTransport calls time out after 5 s.
-//
-// @Summary  UPnP AVTransport control
-// @Tags     Casting
-// @Param    id       path   string  true   "device id"
-// @Param    command  query  string  false  "load|play|pause|stop|seek|subtitles|status"
-// @Success  200  {object}  map[string]interface{}
-// @Failure  404
-// @Router   /casting/{id}/player [get]
-// @Router   /casting/{id}/player [post]
 func (s *server) handlePlayerControl(w http.ResponseWriter, r *http.Request, seg []string) {
 	devID := seg[1]
 

@@ -11,6 +11,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -504,5 +505,26 @@ func TestHLSPersistDisallowedSelfURLRemoved(t *testing.T) {
 	assertExists(t, proxy)
 	if n := m2.Sessions(); n != 2 {
 		t.Errorf("Sessions() = %d, want 2 (good-self, proxy-self)", n)
+	}
+}
+
+// TestValidateMediaURLErrorsAreInvalidMediaURL: every rejection of a caller
+// supplied URL matches types.ErrInvalidMediaURL, so the API answers 400
+// rather than 500, and the original message is kept.
+func TestValidateMediaURLErrorsAreInvalidMediaURL(t *testing.T) {
+	const self = "http://127.0.0.1:11470"
+	for _, raw := range []string{"", "ftp://example.com/x", "http://", self + "/removeAll", self + "/", "http://127.0.0.2:1/x", "%zz"} {
+		err := validateMediaURL(raw, self, nil)
+		if err == nil {
+			t.Errorf("validateMediaURL(%q) accepted", raw)
+			continue
+		}
+		if !errors.Is(err, types.ErrInvalidMediaURL) {
+			t.Errorf("validateMediaURL(%q) = %v, want ErrInvalidMediaURL", raw, err)
+		}
+	}
+	err := validateMediaURL("ftp://example.com/x", self, nil)
+	if err == nil || !strings.Contains(err.Error(), "unsupported URL scheme") {
+		t.Errorf("message lost: %v", err)
 	}
 }

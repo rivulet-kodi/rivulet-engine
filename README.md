@@ -122,7 +122,7 @@ and env file live in [`deploy/systemd`](deploy/systemd).
 | [Bitmagnet](docs/BITMAGNET.md) · [Torznab](docs/TORZNAB.md) | Indexer add-ons |
 | [Platforms](docs/PLATFORMS.md) | Build targets, Android, library mode |
 | [Architecture](docs/ARCHITECTURE.md) | Package layout |
-| [API reference](docs/swagger.yaml) | OpenAPI spec |
+| [API reference](internal/api/openapi.json) | OpenAPI 3.1 spec (also `GET /openapi.json`; interactive page at `/api/reference`) |
 
 ## Security
 
@@ -139,7 +139,7 @@ networks. State-changing routes and `/proxy` additionally check the browser
 make build      # host binary
 make test       # go test -p 1 -race ./...
 make lint       # golangci-lint
-make swagger    # regenerate docs/swagger.{yaml,json}
+make api-fuzz   # fuzz the HTTP API against the OpenAPI spec (docker/podman)
 make smoke      # end-to-end API test against a running build
 ```
 

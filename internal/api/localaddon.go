@@ -564,12 +564,6 @@ func ensureIMDBResolved(localHex, title string, year int, ctype, absPath string)
 // — HTTP handlers —
 
 // handleLocalAddon dispatches all /local-addon/* routes.
-//
-// @Summary  Local-files Stremio add-on (manifest/catalog/meta/stream)
-// @Tags     LocalAddon
-// @Produce  json
-// @Success  200  {object}  map[string]interface{}
-// @Router   /local-addon/manifest.json [get]
 func (s *server) handleLocalAddon(w http.ResponseWriter, r *http.Request, seg []string) {
 	// Honour the localAddonEnabled toggle; when off, every route returns 404.
 	if enabled, _ := s.ss.Get("localAddonEnabled").(bool); !enabled {

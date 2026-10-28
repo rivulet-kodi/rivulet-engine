@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: 2026 The rivulet-engine Authors
+#
+# SPDX-License-Identifier: MIT
+
+# Schemathesis configuration for scripts/api-fuzz.sh. Request budget, seed and
+# target come from the runner; this file holds what is static: the operations
+# the fuzzer must not call and the documented known issues.
+
+color = false
+
+# --- Fuzzed, with an expected 5xx ------------------------------------------------
+# expected-statuses replaces the default list, so the non-error classes stay.
+
+[[operations]]
+# 501 is the deliberate answer to a GET without ?lz= (use POST, or GET ?lz=).
+include-name = "GET /nzb/create"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "501"]
+
+[[operations]]
+include-name = "GET /nzb/create/{key}"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "501"]
+
+[[operations]]
+# Asks api.strem.io for a certificate; 502 is the answer when it is unreachable,
+# which is always the case on the network-less fuzz network.
+include-name = "GET /get-https"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+# Resolves the egress IP through the given proxy; 502 when it is unreachable.
+include-name = "GET /proxy/ip"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+# yt-dlp has no network on the fuzz network; 502 is its failure answer.
+include-name = "GET /yt/{id}"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "502"]
+
+[[operations]]
+# 504 is the documented answer when no peer delivers the torrent metadata in
+# time; the fuzzer asks for random info hashes that nobody seeds.
+include-name = "GET /{infoHash}/create"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "504"]
+
+[[operations]]
+include-name = "POST /{infoHash}/create"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "504"]
+
+[[operations]]
+include-name = "GET /{infoHash}/{fileIdx}"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "504"]
+
+[[operations]]
+include-name = "GET /stream/{infoHash}/{fileIdx}"
+
+[operations.checks.not_a_server_error]
+expected-statuses = ["2xx", "3xx", "4xx", "504"]
+
+# --- Known issues (found or suspected, not covered by this run) --------------------
+# Nothing here is silenced by the configuration above; these are behaviours the
+# fuzzer cannot reach statelessly or that were judged out of scope, kept so
+# they are not forgotten. Each one is a candidate for its own fix + test.
+#
+# * Stateful routes (/nzb/stream, /{archiveType}/stream, /record, /casting/{id},
+#   /api/recordings/{id}, /hlsv2/{id}, /local-addon/file/{hash}) need a session,
+#   recording or device the fuzzer cannot create without real media, an NZB
+#   server or a DLNA device. They are exercised only on their 404 path
+#   ("Missing test data" warnings); the stateful phase is disabled.
+# * GET /{archiveType}/stream/{key}/{file} answers 500 (not 404) when the named
+#   entry does not exist in the archive (internal/api/archive.go,
+#   archiveOpenEntry callers). Not reproducible without an archive session.
+# * GET /{infoHash}/{fileIdx}/subtitles.vtt and GET /subtitles.{ext} answer 200
+#   with an empty body when the conversion fails: headers are already written
+#   when prober.WriteSubtitles errors. Documented as-is in the spec; the
+#   stremio-web player tolerates the empty track.
+# * GET /{infoHash}/stats.json answers 200 `null` for an unknown engine, and
+#   GET /tracks/{url} turns every failure into 200 `[]`: server.js parity,
+#   documented as-is in the spec.
+# * POST /settings is not disabled: it mutates the fuzz engine's settings on
+#   disk only, which is thrown away with the container.
