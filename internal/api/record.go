@@ -242,6 +242,12 @@ func (s *server) recordViaGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// rel is always a path on this server; refuse anything that could be read
+	// as a scheme-relative or absolute URL.
+	if !strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, "//") || strings.HasPrefix(rel, "/\\") {
+		dvrErr(w, http.StatusInternalServerError, "invalid redirect target")
+		return
+	}
 	w.Header().Set("X-Recording-Id", rec.ID)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, rel, http.StatusFound)

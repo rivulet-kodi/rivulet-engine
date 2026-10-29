@@ -6,7 +6,6 @@ package ftpstream
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -58,7 +57,7 @@ const (
 type ftpPoolKey struct {
 	addr         string
 	user         string
-	passSum      [sha256.Size]byte
+	pass         string
 	tls          bool
 	allowPrivate bool
 }

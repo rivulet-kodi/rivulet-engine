@@ -15,7 +15,6 @@ package ftpstream
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -312,7 +311,7 @@ func openFTPAt(ctx context.Context, rawURL string, offset int64, requireSize boo
 	key := ftpPoolKey{
 		addr:         p.addr,
 		user:         p.user,
-		passSum:      sha256.Sum256([]byte(p.pass)),
+		pass:         p.pass,
 		tls:          p.tls,
 		allowPrivate: allowPrivate,
 	}
