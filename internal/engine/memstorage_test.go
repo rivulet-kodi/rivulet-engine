@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -121,27 +122,23 @@ func TestMemStorageWriteCompleteRead(t *testing.T) {
 	}
 }
 
-func TestMemStorageEvictsOldestCompleteKeepsRecentlyRead(t *testing.T) {
+// TestMemStorageEvictsPlayedBeforeReadAhead is the regression for
+// rivulet-kodi/plugin.video.rivulet#96: under plain LRU a read-ahead piece kept
+// its (older) completion stamp while the pieces being played took newer read
+// stamps, so the window ahead of the reader was evicted first and a 4K stream
+// stalled re-downloading the pieces it was about to read.
+func TestMemStorageEvictsPlayedBeforeReadAhead(t *testing.T) {
 	const (
 		pieceLen  = 256
-		numPieces = 4
-		capacity  = 2 * pieceLen // room for exactly two resident pieces
+		numPieces = 8
+		capacity  = 3 * pieceLen // room for exactly three resident pieces
 	)
-	info := syntheticInfo(pieceLen, numPieces)
 	s := newMemStorage(capacity)
 	t.Cleanup(func() { _ = s.Close() })
+	ti, info := openMemTorrent(t, s, 0, pieceLen, numPieces)
 
-	ti, err := s.OpenTorrent(context.Background(), info, metainfo.Hash{})
-	if err != nil {
-		t.Fatalf("OpenTorrent: %v", err)
-	}
-	t.Cleanup(func() {
-		if ti.Close != nil {
-			_ = ti.Close()
-		}
-	})
-
-	writeComplete := func(idx int) storage.PieceImpl {
+	pieces := make([]storage.PieceImpl, numPieces)
+	writeComplete := func(idx int) {
 		t.Helper()
 		p := ti.Piece(info.Piece(idx))
 		if n, err := p.WriteAt(fillPattern(idx, pieceLen), 0); n != pieceLen || err != nil {
@@ -150,55 +147,57 @@ func TestMemStorageEvictsOldestCompleteKeepsRecentlyRead(t *testing.T) {
 		if err := p.MarkComplete(); err != nil {
 			t.Fatalf("piece %d MarkComplete: %v", idx, err)
 		}
-		return p
+		pieces[idx] = p
+	}
+	read := func(idx int) {
+		t.Helper()
+		got, err := readFull(pieces[idx], pieceLen)
+		if err != nil || !bytes.Equal(got, fillPattern(idx, pieceLen)) {
+			t.Fatalf("read p%d: err=%v or wrong bytes", idx, err)
+		}
+	}
+	resident := func(want ...int) {
+		t.Helper()
+		for idx, p := range pieces {
+			if p == nil {
+				continue
+			}
+			if got, w := p.Completion().Complete, slices.Contains(want, idx); got != w {
+				t.Fatalf("p%d resident = %v, want %v (want resident %v)", idx, got, w, want)
+			}
+		}
 	}
 
-	p0 := writeComplete(0)
-	p1 := writeComplete(1) // budget now full: {p1(MRU), p0}
+	writeComplete(0)
+	writeComplete(1)
+	writeComplete(2) // p2 downloaded ahead, completed before p0/p1 are played
+	read(0)
+	read(1)
+	writeComplete(3)
+	resident(1, 2, 3) // the oldest played piece goes, not the unread p2
 
-	// Touch p0 via ReadAt so it becomes most-recently-used: {p0(MRU), p1}.
-	if _, err := readFull(p0, pieceLen); err != nil {
-		t.Fatalf("read p0: %v", err)
-	}
-
-	// Writing a third piece must evict exactly one complete piece. p1 is now the
-	// least-recently-used complete piece, so it is the victim; p0 (recently read)
-	// is retained.
-	p2 := writeComplete(2)
-
-	// p1 evicted: reports not-complete AND ReadAt errors (never stale bytes).
-	if c := p1.Completion(); c.Complete {
-		t.Fatalf("evicted p1 Completion = %+v, want Complete:false", c)
-	}
-	if _, err := p1.ReadAt(make([]byte, pieceLen), 0); err == nil {
-		t.Fatal("evicted p1 ReadAt returned nil error; must signal not-resident so anacrolix re-fetches")
+	if _, err := pieces[0].ReadAt(make([]byte, pieceLen), 0); err == nil {
+		t.Fatal("evicted p0 ReadAt returned nil error; must signal not-resident so anacrolix re-fetches")
 	}
 
-	// p0 retained: still complete and serves its original bytes.
-	if c := p0.Completion(); !c.Ok || !c.Complete {
-		t.Fatalf("retained p0 Completion = %+v, want {Ok:true, Complete:true}", c)
-	}
-	got, err := readFull(p0, pieceLen)
-	if err != nil {
-		t.Fatalf("read retained p0: %v", err)
-	}
-	if !bytes.Equal(got, fillPattern(0, pieceLen)) {
-		t.Fatal("retained p0 returned wrong bytes after eviction")
-	}
+	writeComplete(4)
+	resident(2, 3, 4) // the remaining played piece goes next
 
-	// p2 is resident and complete.
-	if c := p2.Completion(); !c.Ok || !c.Complete {
-		t.Fatalf("new p2 Completion = %+v, want {Ok:true, Complete:true}", c)
-	}
+	// Only read-ahead left: the piece the reader needs last goes first.
+	writeComplete(5)
+	resident(2, 3, 5)
 
-	// Hard budget respected: exactly two pieces (p0, p2) resident.
-	ms := s
-	ms.mu.Lock()
-	used := ms.used
-	ms.mu.Unlock()
-	if used != capacity {
-		t.Fatalf("resident bytes = %d, want %d (two pieces)", used, int64(capacity))
-	}
+	writeComplete(6)
+	resident(2, 3, 6)
+
+	// A forward seek to p6: once played it is evicted first again, and the
+	// unread p2 and p3 are now behind the reader, so they lead the read-ahead
+	// class even though p7 is farther ahead.
+	read(6)
+	writeComplete(7)
+	resident(2, 3, 7)
+	writeComplete(0)
+	resident(0, 3, 7)
 }
 
 // TestMemStorageConcurrentNeverWrongBytes hammers the backend from many
@@ -720,11 +719,14 @@ func openMemTorrent(t *testing.T, s *memStorage, id byte, pieceLen int64, numPie
 	return ti, info
 }
 
-// TestMemStorageEvictionIsExactLRU drives a random mix of completions and
+// TestMemStorageEvictionMatchesModel drives a random mix of completions and
 // reads and checks, after every step, that the resident set equals a reference
-// strict-LRU model: the heap-based eviction must pick exactly the least
-// recently used complete piece, however reads and completions interleave.
-func TestMemStorageEvictionIsExactLRU(t *testing.T) {
+// model of the eviction policy: consumed (read) pieces go first, least recently
+// read first; then read-ahead pieces below the reader position, lowest index
+// first; then the read-ahead piece farthest ahead. The heap, its lazily
+// refreshed keys and the ahead scan must agree with it however reads and
+// completions interleave.
+func TestMemStorageEvictionMatchesModel(t *testing.T) {
 	const (
 		pieceLen  = 64
 		numPieces = 200
@@ -740,33 +742,48 @@ func TestMemStorageEvictionIsExactLRU(t *testing.T) {
 	}
 
 	rng := rand.New(rand.NewPCG(7, 7))
-	var order []int // resident complete pieces, least recently used first
-	indexOf := func(idx int) int {
-		for i, v := range order {
-			if v == idx {
-				return i
+	var consumed []int      // read pieces, least recently read first
+	ahead := map[int]bool{} // complete, not yet read
+	readPos := -1           // index of the last first-read piece
+	isResident := func(idx int) bool { return ahead[idx] || slices.Contains(consumed, idx) }
+	evict := func() {
+		if len(consumed) > 0 {
+			consumed = consumed[1:]
+			return
+		}
+		victim, skipped := -1, false
+		for idx := range ahead {
+			switch sk := idx < readPos; {
+			case sk && (!skipped || idx < victim):
+				victim, skipped = idx, true
+			case !sk && !skipped && idx > victim:
+				victim = idx
 			}
 		}
-		return -1
-	}
-	touch := func(idx int) {
-		if i := indexOf(idx); i >= 0 {
-			order = append(order[:i], order[i+1:]...)
-		}
-		order = append(order, idx)
+		delete(ahead, victim)
 	}
 
 	buf := make([]byte, 8)
 	for step := range steps {
-		if len(order) > 0 && rng.IntN(3) > 0 {
-			idx := order[rng.IntN(len(order))]
+		n := len(consumed) + len(ahead)
+		if n > 0 && rng.IntN(3) > 0 {
+			idx := rng.IntN(numPieces)
+			for !isResident(idx) {
+				idx = rng.IntN(numPieces)
+			}
 			if n, err := pieces[idx].ReadAt(buf, 0); n != len(buf) || err != nil {
 				t.Fatalf("step %d: ReadAt(%d) = (%d, %v)", step, idx, n, err)
 			}
-			touch(idx)
+			if ahead[idx] {
+				delete(ahead, idx)
+				readPos = idx
+			} else {
+				consumed = slices.DeleteFunc(consumed, func(v int) bool { return v == idx })
+			}
+			consumed = append(consumed, idx)
 		} else {
 			idx := rng.IntN(numPieces)
-			if indexOf(idx) >= 0 {
+			if isResident(idx) {
 				continue
 			}
 			if _, err := pieces[idx].WriteAt(fillPattern(idx, pieceLen), 0); err != nil {
@@ -775,14 +792,14 @@ func TestMemStorageEvictionIsExactLRU(t *testing.T) {
 			if err := pieces[idx].MarkComplete(); err != nil {
 				t.Fatalf("step %d: MarkComplete(%d): %v", step, idx, err)
 			}
-			touch(idx)
-			if len(order) > resident {
-				order = order[1:]
+			if n == resident {
+				evict()
 			}
+			ahead[idx] = true
 		}
 		for idx, p := range pieces {
-			if want, got := indexOf(idx) >= 0, p.Completion().Complete; want != got {
-				t.Fatalf("step %d: piece %d resident = %v, LRU model says %v", step, idx, got, want)
+			if want, got := isResident(idx), p.Completion().Complete; want != got {
+				t.Fatalf("step %d: piece %d resident = %v, model says %v", step, idx, got, want)
 			}
 		}
 	}
@@ -994,7 +1011,10 @@ func TestMemStorageWriteTo(t *testing.T) {
 		t.Fatalf("WriteTo(short writer) err = %v, want io.ErrShortWrite", err)
 	}
 
-	// Evict p0 by completing p1 and p2 in a two-piece budget.
+	// Evict p0 by playing it, then completing p1 and p2 in a two-piece budget.
+	if _, err := readFull(p0, pieceLen); err != nil {
+		t.Fatal(err)
+	}
 	for _, idx := range []int{1, 2} {
 		p := ti.Piece(info.Piece(idx))
 		if _, err := p.WriteAt(make([]byte, pieceLen), 0); err != nil {

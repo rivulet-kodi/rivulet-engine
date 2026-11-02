@@ -104,6 +104,16 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		return fmt.Errorf("cannot create app path %s: %w", appPath, err)
 	}
 
+	// RIVULET_CACHE_ROOT moves the disk piece cache off APP_PATH, e.g. to a
+	// tmpfs, USB drive or HDD when APP_PATH sits on an SD card that streaming
+	// would wear out (rivulet-kodi/plugin.video.rivulet#96).
+	cacheRoot := strings.TrimSpace(getenv(lookup, "RIVULET_CACHE_ROOT", ""))
+	if cacheRoot == "" {
+		cacheRoot = appPath
+	} else if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		return fmt.Errorf("cannot create cache root %s: %w", cacheRoot, err)
+	}
+
 	allowedOriginsExtra, allowAllOrigins := allowedOrigins(lookup)
 	proxySecretVal, err := proxySecret(appPath, lookup)
 	if err != nil {
@@ -123,7 +133,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		HTTPPort:            envInt(lookup, "HTTP_PORT", 11470),
 		HTTPSPort:           envInt(lookup, "HTTPS_PORT", 12470), // self-signed HTTPS for https web UIs (WebKitGTK)
 		AppPath:             appPath,
-		CacheRoot:           appPath,
+		CacheRoot:           cacheRoot,
 		MemoryCacheSize:     envInt64(lookup, "RIVULET_MEMORY_CACHE_SIZE", 0),                                                    // bytes; 0 = disabled (write pieces to disk)
 		StorageMmap:         strings.EqualFold(strings.TrimSpace(getenv(lookup, "TORRENT_STORAGE_DEFAULT_FILE_IO", "")), "mmap"), // default classic pread/pwrite; "mmap" opts in
 		ListenPort:          envInt(lookup, "BT_LISTEN_PORT", 0),

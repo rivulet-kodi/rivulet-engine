@@ -29,11 +29,20 @@ package engine
 //     budget global (torrent-piece-request-order.go keys the shared request
 //     order on the Capacity pointer).
 //
-//  2. A hard byte cap enforced by this storage via LRU eviction of COMPLETE
-//     pieces. On a write that would exceed the budget we free the least-
-//     recently-accessed complete piece(s): drop the buffer and flip the piece
-//     to not-complete. ReadAt updates recency, so recently-read pieces are
-//     retained and already-played pieces are evicted first.
+//  2. A hard byte cap enforced by this storage via eviction of COMPLETE
+//     pieces. On a write that would exceed the budget we free complete
+//     piece(s): drop the buffer and flip the piece to not-complete. Victims
+//     come in two classes. Pieces the reader has already consumed (read, or
+//     skipped over by a forward seek) go first, least recently read first.
+//     Read-ahead pieces — completed but not yet read — go only once no
+//     consumed piece is left, farthest-ahead (highest index) first. Plain LRU
+//     got this backwards (issue rivulet-kodi/plugin.video.rivulet#96): a
+//     read-ahead piece kept its completion stamp while the pieces being played
+//     took newer read stamps, so at high bitrates the window ahead of the
+//     reader was evicted before the data behind it and a 4K stream stalled on
+//     "piece not resident" re-downloads of the very pieces it was about to read.
+//     Read-ahead pieces a forward seek skipped (below the reader position)
+//     lead that class, as they will not be read.
 //
 // Concurrency model:
 //
@@ -49,8 +58,10 @@ package engine
 //     either of them.
 //   - Read recency is an atomic stamp (memPiece.lastUsed); the heap keeps a
 //     lower bound of it per piece and refreshes a stale key only when the piece
-//     surfaces as the eviction candidate, so a read costs no heap operation and
-//     eviction is O(log n) amortised instead of a scan over every piece.
+//     surfaces as the eviction candidate, so a repeat read costs no heap
+//     operation and eviction is O(log n) amortised instead of a scan over every
+//     piece. Only the first read of a piece (moving it from the read-ahead class
+//     to the consumed class) takes memStorage.mu, once per piece.
 //
 // Correctness — we never serve wrong or stale bytes:
 //
@@ -88,6 +99,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -209,6 +221,7 @@ func (s *memStorage) OpenTorrent(
 		infoHash: ih,
 		pieces:   make([]atomic.Pointer[memPiece], info.NumPieces()),
 	}
+	mt.readPos = -1
 	return storage.TorrentImpl{
 		Piece:    mt.piece,
 		Close:    mt.close,
@@ -261,6 +274,7 @@ func (s *memStorage) freeLocked(mp *memPiece) {
 		mp.data = nil
 	}
 	mp.complete = false
+	mp.consumed.Store(false)
 	mp.mu.Unlock()
 }
 
@@ -300,10 +314,11 @@ func (s *memStorage) evictLocked(need int64, keep *memPiece) {
 	}
 }
 
-// popOldestLocked removes and returns the complete piece with the smallest
-// lastUsed (least recently read), or nil when the LRU is empty.
+// popOldestLocked removes and returns the next eviction victim: the consumed
+// piece with the smallest lastUsed, else the read-ahead victim chosen by
+// popAheadLocked, or nil when the LRU is empty.
 //
-// Reads only bump memPiece.lastUsed (atomically, without s.mu); the heap key is
+// Repeat reads only bump memPiece.lastUsed (atomically, without s.mu); the heap key is
 // a lower bound of it. A top whose lastUsed has moved past its key is re-keyed
 // and sifted down; the first top whose key is current is then the true minimum,
 // because every other key is a lower bound of that piece's lastUsed and is >=
@@ -311,6 +326,9 @@ func (s *memStorage) evictLocked(need int64, keep *memPiece) {
 func (s *memStorage) popOldestLocked() *memPiece {
 	for len(s.lru) > 0 {
 		top := s.lru[0]
+		if top.key >= aheadKeyBase {
+			return s.popAheadLocked()
+		}
 		if lu := top.lastUsed.Load(); lu > top.key {
 			top.key = lu
 			heap.Fix(&s.lru, 0)
@@ -321,13 +339,67 @@ func (s *memStorage) popOldestLocked() *memPiece {
 	return nil
 }
 
-// stamp records a read of mp for eviction ordering. It is lock-free, and a no-op
-// when mp already holds the newest stamp (a stream reading one piece
-// sequentially therefore never writes the shared clock).
+// aheadKeyBase separates the two eviction classes in the heap. A consumed
+// piece's key is a tick (a read count, far below 2^62); a read-ahead piece's
+// key is aheadKeyBase + (MaxInt32 - index), so every read-ahead piece sorts
+// after every consumed one, and among themselves the highest index — the piece
+// the reader needs last — is evicted first.
+const aheadKeyBase = int64(1) << 62
+
+func aheadKey(index int) int64 { return aheadKeyBase + int64(math.MaxInt32-index) }
+
+// stamp records a read of mp for eviction ordering. A repeat read of a consumed
+// piece is lock-free, and a no-op when mp already holds the newest stamp (a
+// stream reading one piece sequentially therefore never writes the shared
+// clock). The first read of a piece takes s.mu once to move it to the consumed
+// class.
 func (s *memStorage) stamp(mp *memPiece) {
+	if !mp.consumed.Load() {
+		s.mu.Lock()
+		s.consumeLocked(mp)
+		s.mu.Unlock()
+		return
+	}
 	if mp.lastUsed.Load() != s.tick.Load() {
 		mp.lastUsed.Store(s.tick.Add(1))
 	}
+}
+
+// consumeLocked moves mp, on its first read, from the read-ahead class to the
+// consumed class with the newest tick, and records it as the reader position.
+// A racing first read that lost the lock only refreshes the tick. Caller holds
+// s.mu.
+func (s *memStorage) consumeLocked(mp *memPiece) {
+	stamp := s.tick.Add(1)
+	mp.lastUsed.Store(stamp)
+	if mp.consumed.Load() {
+		return
+	}
+	mp.consumed.Store(true)
+	mp.mt.readPos = mp.index
+	if mp.lruIdx >= 0 {
+		mp.key = stamp
+		heap.Fix(&s.lru, mp.lruIdx)
+	}
+}
+
+// popAheadLocked removes and returns the read-ahead victim once no consumed
+// piece is left: a piece below its torrent's reader position (skipped by a
+// forward seek), else the one farthest ahead (the heap top). It scans the
+// heap, but only in this state — normally consumed pieces are evicted first,
+// in O(log n). A scan rather than a heap key because the reader position moves
+// and would invalidate every ahead key; tying the skipped test to the position
+// at eviction time also keeps a second reader of the same torrent (a probe of
+// the file's tail) from writing off the first reader's window. Caller holds
+// s.mu and the heap is non-empty.
+func (s *memStorage) popAheadLocked() *memPiece {
+	victim := 0
+	for i, mp := range s.lru {
+		if mp.index < mp.mt.readPos && (s.lru[victim].index >= s.lru[victim].mt.readPos || mp.index < s.lru[victim].index) {
+			victim = i
+		}
+	}
+	return heap.Remove(&s.lru, victim).(*memPiece)
 }
 
 // lruHeap is a min-heap of resident complete pieces ordered by memPiece.key.
@@ -366,6 +438,12 @@ type memTorrent struct {
 	store    *memStorage
 	infoHash metainfo.Hash
 	pieces   []atomic.Pointer[memPiece]
+
+	// readPos is the index of the piece the reader last read for the first
+	// time (-1 before any read). Once only read-ahead pieces are left,
+	// popAheadLocked evicts those below it first: a forward seek skipped them
+	// and they will not be read. Written and read under store.mu.
+	readPos int
 }
 
 // piece returns the (lazily created) memPiece for p. anacrolix calls it for
@@ -418,9 +496,16 @@ type memPiece struct {
 	allocMu sync.Mutex
 
 	// lastUsed records the store tick of the most recent successful
-	// ReadAt on this piece, updated atomically without holding any lock.
-	// popOldestLocked uses it to pick the least-recently-read complete piece.
+	// ReadAt on this piece (its completion tick until then), updated
+	// atomically without holding any lock. popOldestLocked uses it to pick the
+	// least-recently-read consumed piece.
 	lastUsed atomic.Int64
+
+	// consumed is true once the reader has read this piece; until then a
+	// complete piece is read-ahead and evicted last. Set under store.mu,
+	// cleared when the buffer is freed or the piece re-completes; loaded
+	// lock-free by stamp.
+	consumed atomic.Bool
 
 	// key and lruIdx are the piece's heap key (a lower bound of lastUsed) and
 	// position in store.lru (-1 when not in the LRU). Guarded by store.mu.
@@ -617,11 +702,11 @@ func (mp *memPiece) MarkComplete() error {
 	}
 	mp.complete = true
 	mp.mu.Unlock()
-	// Stamp recency so this piece starts with a fair lastUsed for eviction;
-	// older pieces (with smaller ticks) will be evicted first.
-	stamp := s.tick.Add(1)
-	mp.lastUsed.Store(stamp)
-	mp.key = stamp
+	// A freshly verified piece is read-ahead until the reader reads it: it is
+	// keyed to be evicted after every consumed piece (see aheadKeyBase).
+	mp.lastUsed.Store(s.tick.Add(1))
+	mp.consumed.Store(false)
+	mp.key = aheadKey(mp.index)
 	if mp.lruIdx >= 0 {
 		heap.Fix(&s.lru, mp.lruIdx)
 	} else {
