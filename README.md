@@ -96,6 +96,7 @@ common ones:
 | `APP_PATH` | `~/.rivulet-engine` | Data and cache root. |
 | `RIVULET_PUBLIC_URL` | derived | External base URL, for use behind a reverse proxy. |
 | `RIVULET_ALLOWED_ORIGINS` | built-in list | Extra browser `Origin`s allowed to call the API. |
+| `RIVULET_CACHE_ROOT` | `$APP_PATH` | Disk piece-cache directory (e.g. tmpfs or a USB drive instead of an SD card). |
 | `RIVULET_MEMORY_CACHE_SIZE` | `0` (disk) | RAM-only piece cache in bytes, for low-disk devices. |
 | `RIVULET_TORRENT_IDLE_TIMEOUT` | `300` | Seconds before an unused torrent is dropped. |
 | `RIVULET_HWACCEL` | auto | `0` forces software transcode, or pin `vaapi`, `nvenc`, … |
