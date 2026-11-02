@@ -358,7 +358,7 @@ func TestTranscodeSegmentCacheHitTouchesIndex(t *testing.T) {
 	dir := t.TempDir()
 	s := &hlsSession{dir: dir, duration: 40, segLocks: map[string]*sync.Mutex{}}
 	writeSeg(t, dir, "seg2.ts", 64)
-	p, err := m.transcodeSegment(context.Background(), s, 2, segMuxed, 0)
+	p, err := m.transcodeSegment(context.Background(), s, 2, segMuxed, 0, false)
 	if err != nil || filepath.Base(p) != "seg2.ts" {
 		t.Fatalf("cache hit = %q, %v", p, err)
 	}

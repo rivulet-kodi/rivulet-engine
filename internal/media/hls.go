@@ -138,6 +138,15 @@ type hlsSession struct {
 	// busy one at most one write per ReaperInterval. Unused unless
 	// HLSConfig.Persist is on.
 	persistedAccess atomic.Int64
+	// uncached records, per segment filename, why the last transcode of
+	// that segment was served but not cached (see installSegment); a later
+	// cached transcode clears it. Reported by the preparation status.
+	// Guarded by mu; nil until first use.
+	uncached map[string]string
+	// prep is the session's preparation job state and pins the segments it
+	// prepares, which evictSegments never removes (see prepare.go).
+	prep prepState
+	pins atomic.Pointer[pinSet]
 }
 
 // idleTTL returns the idle-eviction window that applies to s: its own
@@ -233,6 +242,11 @@ type hlsManager struct {
 	// Probe/Tracks/StartHLS share one semaphore.
 	guard  probeGuard
 	shared *probeGuard
+	// transcode is the segment-transcode seam used by preparation jobs; nil
+	// means transcodeSegment. Only tests set it.
+	transcode func(ctx context.Context, s *hlsSession, n int, kind segKind, audioIdx int, bg bool) (string, error)
+	// resumeOnce makes ResumePrepared run once (see prepare.go).
+	resumeOnce atomic.Bool
 }
 
 // ── encoder detection ─────────────────────────────────────────────────────────
@@ -928,15 +942,7 @@ func buildMasterPlaylist(in masterPlaylistInputs) string {
 	// entry as a selectable audio rendition.  It follows the URI to audio<k>.m3u8
 	// and fetches the corresponding a<k>seg<n>.ts files.
 
-	// Determine which stream gets DEFAULT=YES (first with disposition.default,
-	// or stream 0 if none is marked default).
-	defaultIdx := 0
-	for k, a := range in.audioStreams {
-		if a.IsDefault {
-			defaultIdx = k
-			break
-		}
-	}
+	defaultIdx := defaultAudioIndex(in.audioStreams)
 
 	for k, a := range in.audioStreams {
 		// Human-readable NAME: prefer language tag, then title, then ordinal.
@@ -970,6 +976,18 @@ func buildMasterPlaylist(in masterPlaylistInputs) string {
 		fmt.Fprintf(&b, "#EXT-X-STREAM-INF:%s,AUDIO=\"aud\"\nvideo.m3u8\n", streamInf)
 	}
 	return b.String()
+}
+
+// defaultAudioIndex returns the audio stream that gets DEFAULT=YES in the
+// master playlist: the first with disposition.default, or stream 0 if none
+// is marked default.
+func defaultAudioIndex(streams []audioStream) int {
+	for k, a := range streams {
+		if a.IsDefault {
+			return k
+		}
+	}
+	return 0
 }
 
 // ── HLSFile ───────────────────────────────────────────────────────────────────
@@ -1113,7 +1131,7 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 		if multiAudio {
 			kind = segVideoOnly
 		}
-		p, err := m.transcodeSegment(ctx, s, n, kind, 0)
+		p, err := m.transcodeSegment(ctx, s, n, kind, 0, false)
 		if err != nil {
 			return "", "", err
 		}
@@ -1142,7 +1160,7 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 				return "", "", fmt.Errorf("hls: segment %d beyond media duration (%.0fs)", n, sessionDur)
 			}
 		}
-		p, err := m.transcodeSegment(ctx, s, n, segAudioOnly, k)
+		p, err := m.transcodeSegment(ctx, s, n, segAudioOnly, k, false)
 		if err != nil {
 			return "", "", err
 		}
@@ -1383,6 +1401,18 @@ const subtitleConcurrency = 2
 // subtitleLimit is the fixed limit for hlsManager.subs.
 func subtitleLimit() int { return subtitleConcurrency }
 
+// acquireBackgroundSlot is acquireTranscodeSlot for background work
+// (preparation): it takes a slot only while no live request is waiting for
+// one, and at most cfg.PrepareConcurrency at once (see slotSem.acquireLow).
+func (m *hlsManager) acquireBackgroundSlot(ctx context.Context) error {
+	return m.slots.acquireLow(ctx, m.currentConcurrency, m.cfg.PrepareConcurrency)
+}
+
+// releaseBackgroundSlot releases a slot acquired by acquireBackgroundSlot.
+func (m *hlsManager) releaseBackgroundSlot() {
+	m.slots.releaseLow(m.currentConcurrency)
+}
+
 // acquireTranscodeSlot blocks until a concurrent-transcode slot is available
 // or ctx is done. Waiters queue FIFO on a semaphore woken by
 // releaseTranscodeSlot (no polling); the limit is re-read from
@@ -1473,7 +1503,13 @@ func (m *hlsManager) currentConcurrency() int {
 // arguments below change in a way that alters the output, bump
 // sessionFormatVersion (persist.go) so old segments are discarded instead of
 // being spliced with new ones.
-func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int, kind segKind, audioIdx int) (string, error) {
+//
+// bg marks a background (preparation) transcode: it takes a low-priority slot
+// (acquireBackgroundSlot) before the segment's lock, and only TryLocks that,
+// returning errSegmentBusy when a live request holds it. A live request that
+// holds the lock while it waits for a slot can then never be stuck behind a
+// background job that holds a slot while it waits for the lock.
+func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int, kind segKind, audioIdx int, bg bool) (string, error) {
 	s.mu.RLock()
 	sessionDur := s.duration
 	highBitDepth := s.highBitDepth
@@ -1493,7 +1529,17 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	segFile := filepath.Join(s.dir, filename)
 
 	l := s.lockFor(filename)
-	l.Lock()
+	if bg {
+		if err := m.acquireBackgroundSlot(ctx); err != nil {
+			return "", err
+		}
+		defer m.releaseBackgroundSlot()
+		if !l.TryLock() {
+			return "", errSegmentBusy
+		}
+	} else {
+		l.Lock()
+	}
 	defer l.Unlock()
 	if fi, err := os.Stat(segFile); err == nil && fi.Size() > 0 {
 		s.noteSegment(filename, fi.Size(), time.Now()) // refresh LRU recency
@@ -1503,10 +1549,12 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	// Bound concurrent ffmpeg spawns: a client prefetch burst must not fork
 	// unbounded processes.  Respect the caller context so a disconnected client
 	// releases the slot rather than blocking indefinitely.
-	if err := m.acquireTranscodeSlot(ctx); err != nil {
-		return "", err
+	if !bg {
+		if err := m.acquireTranscodeSlot(ctx); err != nil {
+			return "", err
+		}
+		defer m.releaseTranscodeSlot()
 	}
-	defer m.releaseTranscodeSlot()
 
 	start := float64(n) * segDur
 	dur := segDur
@@ -1815,6 +1863,14 @@ func (s *hlsSession) installSegment(filename, src, reason string) (string, error
 	s.mu.Lock()
 	old := s.provisional[filename]
 	delete(s.provisional, filename)
+	if reason != "" {
+		if s.uncached == nil {
+			s.uncached = map[string]string{}
+		}
+		s.uncached[filename] = reason
+	} else {
+		delete(s.uncached, filename)
+	}
 	s.mu.Unlock()
 	var keep []string
 	for _, p := range old {
@@ -2023,6 +2079,7 @@ func (m *hlsManager) DeleteHLS(id string) error {
 	s.deleted.Store(true)
 	idle := s.inFlight.Load() == 0
 	m.mu.Unlock()
+	s.prep.cancelJob() // a running preparation holds inFlight; stop it
 
 	if idle {
 		m.removeDeletedSession(id, s)

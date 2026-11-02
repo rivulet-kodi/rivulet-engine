@@ -288,14 +288,15 @@ start_stateful() {
 	# root and the only private hosts it may fetch from (the proxy and HLS
 	# allowlists are per host; archive/NZB fetches have only an on/off switch,
 	# and the NNTP connection of an NZB goes through the same switch), DVR on,
-	# and a local-files library whose files are served by hash.
+	# a local-files library whose files are served by hash, and HLS
+	# preparation (its routes act on the fuzz-hls session).
 	"$docker_cli" run -d --name "$stateful_engine" --network "$net" --network-alias rivulet-stateful \
 		-v "$report_dir/fixtures:/fixtures:ro" \
 		-e RIVULET_ALLOWED_HOSTS=rivulet-stateful "${engine_env[@]}" \
 		-e RIVULET_ARCHIVE_LOCAL_ROOT=/fixtures \
 		-e RIVULET_ARCHIVE_ALLOW_PRIVATE=1 \
 		-e RIVULET_PROXY_PRIVATE_ALLOW=fixtures \
-		-e RIVULET_HLS_PRIVATE_ALLOW=fixtures \
+		-e RIVULET_HLS_PRIVATE_ALLOW=fixtures 		-e RIVULET_HLS_PREPARE=1 \
 		-e RIVULET_DVR_ENABLED=1 \
 		-e RIVULET_DVR_MAX_ACTIVE=16 \
 		-e LOCAL_FILES_DIR=/fixtures/library \

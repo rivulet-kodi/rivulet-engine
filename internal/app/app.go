@@ -509,6 +509,11 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 			reportFatal(fmt.Errorf("http server error: %w", err))
 		}
 	})
+	// Resume persisted HLS preparation jobs now that the listener that feeds
+	// ffmpeg its input is starting (RIVULET_HLS_PREPARE + RIVULET_HLS_PERSIST).
+	if r, ok := prober.(interface{ ResumeHLSPrepare() }); ok {
+		r.ResumeHLSPrepare()
+	}
 
 	// Optional pprof endpoint for diagnostics; disabled unless RIVULET_PPROF is
 	// set (e.g. RIVULET_PPROF=127.0.0.1:6060). Handlers come from net/http/pprof.
@@ -704,6 +709,10 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		MaxSessions:    envInt(lookup, "RIVULET_HLS_MAX_SESSIONS", d.MaxSessions),
 		WorkDir:        getenv(lookup, "RIVULET_HLS_WORK_DIR", d.WorkDir),
 		Persist:        envBool(lookup, "RIVULET_HLS_PERSIST", d.Persist),
+
+		// Engine-side preparation (POST /hlsv2/{id}/prepare); off by default.
+		Prepare:            envBool(lookup, "RIVULET_HLS_PREPARE", d.Prepare),
+		PrepareConcurrency: envInt(lookup, "RIVULET_HLS_PREPARE_CONCURRENCY", d.PrepareConcurrency),
 
 		DisableIdleEviction: sessionTTL == 0,
 

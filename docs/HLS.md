@@ -142,3 +142,93 @@ ahead and still have it after a restart, crash or update.
   that is ours but more open than `0700` is tightened to `0700`. Use a
   dedicated `RIVULET_HLS_WORK_DIR` owned by the server's user, not a shared
   directory such as `/tmp`.
+
+## Preparing HLS sessions
+
+`RIVULET_HLS_PREPARE=1` adds `/hlsv2/{id}/prepare`, so a front end can have
+a title transcoded ahead of time without requesting every segment itself.
+Off by default: the path then answers `404` exactly as before. Create the
+session first with `GET /hlsv2/{id}/master.m3u8?mediaURL=…`, then:
+
+- **`POST /hlsv2/{id}/prepare`** starts a background job that transcodes
+  every segment of the session in playback order, skipping the cached ones,
+  and answers `202` with the status below. For a multi-audio session it
+  prepares the video and the default audio rendition, or every audio
+  rendition with `?audio=all`. A job already running with the same `audio`
+  is left alone, one with another `audio` is replaced, and a finished one is
+  started again (it re-checks every segment).
+- **`GET /hlsv2/{id}/prepare`** answers `200` with the status. It works
+  before any job, so a front end can check what is cached already, and it
+  doesn't count as an access to the session.
+- **`DELETE /hlsv2/{id}/prepare`** stops the job and unpins the segments
+  (`204`). The cached ones stay, and the eviction after the session's next
+  cached live transcode trims them back under its cache cap; the session
+  itself is kept.
+
+Errors: `400` invalid id or `audio`, `404` unknown session, `409` the
+session's duration is unknown (its probe failed), `507` the estimated
+prepared size is over an explicit `RIVULET_HLS_SEGMENT_CACHE_BYTES`. POST
+and DELETE are subject to the Origin allowlist like every state-changing
+route.
+
+The status:
+
+```json
+{
+  "state": "running",
+  "audio": "default",
+  "segments": 3,
+  "total": 6,
+  "cached": 3,
+  "uncached": 1,
+  "failed": 0,
+  "cachedBytes": 15040000,
+  "estimatedBytes": 25560000,
+  "renditions": [
+    { "playlist": "video.m3u8", "map": "cc-" },
+    { "playlist": "audio1.m3u8", "map": "cu-" }
+  ],
+  "issues": [{ "file": "a1seg1.ts", "reason": "no audio PES" }]
+}
+```
+
+`state` is `idle` (no job, or stopped), `running`, `done` (the job finished
+its passes: compare `cached` with `total`; a segment that live requests kept
+busy through both passes stays `-`) or `failed` (the job stopped after
+three transcode errors in a row, with the last one in `error`). Each `map`
+has one character per segment: `c` cached, `-` not cached (not transcoded
+yet, or evicted), `u` transcoded but not cached because the output failed
+its check, `f` the transcode failed; `issues` gives the reason for up to 100
+of them. `estimatedBytes` is the size at the session's peak bitrate
+(maxrate plus audio), an upper bound in practice.
+
+How the job behaves:
+
+- **Live requests first.** Preparation transcodes share the
+  `RIVULET_TRANSCODE_CONCURRENCY` slots with live requests, but take one only
+  while no live request is waiting, and at most
+  `RIVULET_HLS_PREPARE_CONCURRENCY` (default `1`) at once across every
+  session. A running preparation transcode is not interrupted, so with a
+  single slot a live request can wait for up to one segment. A segment a
+  live request is transcoding is left to it.
+- **Pinned segments.** The segments a job prepares are never evicted and
+  don't count against the per-session cache cap, so a long film isn't
+  evicted while it is prepared; the cap still bounds what live playback
+  adds around them (other audio renditions). With an explicit
+  `RIVULET_HLS_SEGMENT_CACHE_BYTES`, a session whose estimated prepared size
+  is over it is refused instead (`507`). Pinned segments still go with the
+  session when it is deleted or evicted.
+- **Retries.** Segments that failed or came out uncached are tried once
+  more after the first pass.
+- **Session lifetime.** A session being prepared is never evicted as idle.
+  Once the job is done the session's idle TTL applies again, so give it a
+  long `ttl` (see [Per-session HLS overrides](#per-session-hls-overrides)) or
+  set `RIVULET_HLS_SESSION_TTL` to cover the wait until it is watched.
+  `DELETE /hlsv2/{id}` stops the job and removes the session.
+- **Restarts.** With `RIVULET_HLS_PERSIST`, the request is kept in the
+  session directory's `prepare.json`, and the job resumes on start, once the
+  server's own HTTP listener answers (torrent sources are read through it),
+  skipping the segments already on disk. Each prepared segment counts as a
+  use of the session, so a restart in the middle of a job keeps it; the
+  session's TTL still applies to the time the server is down. Without
+  persistence, jobs end with the process.

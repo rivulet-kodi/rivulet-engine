@@ -82,6 +82,20 @@ func (ix *segIndex) loadLocked(dir string) {
 	}
 }
 
+// cachedSegments returns the size of every cached segment file in the
+// session directory, keyed by filename.
+func (s *hlsSession) cachedSegments() map[string]int64 {
+	ix := &s.segIdx
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.loadLocked(s.dir)
+	out := make(map[string]int64, len(ix.files))
+	for name, e := range ix.files {
+		out[name] = e.size
+	}
+	return out
+}
+
 // noteSegment records that cached segment filename (size bytes) was just
 // produced or served, refreshing its recency.
 func (s *hlsSession) noteSegment(filename string, size int64, now time.Time) {
@@ -117,28 +131,41 @@ func (m *hlsManager) segmentCacheBytes(s *hlsSession) int64 {
 // transcoded or concurrently returned). If everything left is protected the
 // cache temporarily exceeds limit rather than breaking a request.
 //
+// Segments pinned by a preparation job (s.pins, see prepare.go) are never
+// removed and don't count against limit: the cap bounds the unpinned
+// working set that live playback builds up around them.
+//
 // The caller typically holds lockFor(keep); the other locks are only ever
 // TryLock'd, so there is no lock-order hazard.
 func (s *hlsSession) evictSegments(limit int64, keep string, now time.Time) {
 	if limit <= 0 {
 		return
 	}
+	pins := s.pins.Load()
 	ix := &s.segIdx
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	ix.loadLocked(s.dir)
-	if ix.total <= limit {
+	total := ix.total
+	if pins != nil {
+		for name, e := range ix.files {
+			if pins.has(name) {
+				total -= e.size
+			}
+		}
+	}
+	if total <= limit {
 		return
 	}
 	cands := make([]string, 0, len(ix.files))
 	for name, e := range ix.files {
-		if name != keep && now.Sub(e.last) >= segServeGrace {
+		if name != keep && now.Sub(e.last) >= segServeGrace && !pins.has(name) {
 			cands = append(cands, name)
 		}
 	}
 	sort.Slice(cands, func(i, j int) bool { return ix.files[cands[i]].last.Before(ix.files[cands[j]].last) })
 	for _, name := range cands {
-		if ix.total <= limit {
+		if total <= limit {
 			return
 		}
 		l := s.lockFor(name)
@@ -147,6 +174,7 @@ func (s *hlsSession) evictSegments(limit int64, keep string, now time.Time) {
 		}
 		err := os.Remove(filepath.Join(s.dir, name))
 		if err == nil || errors.Is(err, os.ErrNotExist) {
+			total -= ix.files[name].size
 			ix.total -= ix.files[name].size
 			delete(ix.files, name)
 		}

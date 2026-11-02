@@ -3404,6 +3404,216 @@
         }
       }
     },
+    "/hlsv2/{id}/prepare": {
+      "get": {
+        "operationId": "hlsPrepareStatus",
+        "summary": "HLS session preparation status",
+        "tags": [
+          "HLS"
+        ],
+        "description": "Needs `RIVULET_HLS_PREPARE`. Progress of the session's preparation job and the cache status of every segment of the prepared renditions (one character per segment). Works whether or not a job was started: while `idle` the map covers the default rendition set. Does not count as an access to the session.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "HLS session id (created by `GET /hlsv2/{id}/master.m3u8`)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preparation status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HLSPrepareStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid session id",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found: unknown session, or preparation is off (`RIVULET_HLS_PREPARE` unset); with it off this path is handled like any other `/hlsv2/{id}/{file}` request, which answers 404 for `prepare`.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      },
+      "post": {
+        "operationId": "hlsPrepareStart",
+        "summary": "Start preparing an HLS session",
+        "tags": [
+          "HLS"
+        ],
+        "description": "Needs `RIVULET_HLS_PREPARE`. Starts a background job that transcodes every segment of the session at low priority (at most `RIVULET_HLS_PREPARE_CONCURRENCY` at once, and only while no live request waits for a transcode slot) and pins them in the session's cache. A job already running with the same `audio` is left alone; one with another `audio` is replaced; a finished one is started again, which re-checks every segment. With `RIVULET_HLS_PERSIST` the job resumes after a restart.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "HLS session id (created by `GET /hlsv2/{id}/master.m3u8`)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "audio",
+            "in": "query",
+            "required": false,
+            "description": "Multi-audio sessions: `default` (the default audio rendition, the default) or `all`. Single-audio sessions prepare their muxed segments either way.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "default",
+                "all"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Job started or running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HLSPrepareStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid session id or `audio`",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found: unknown session, or preparation is off (`RIVULET_HLS_PREPARE` unset); with it off this path is handled like any other `/hlsv2/{id}/{file}` request, which answers 404 for `prepare`.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The session's duration is unknown (its probe failed)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "The estimated prepared size exceeds `RIVULET_HLS_SEGMENT_CACHE_BYTES`",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Other error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "hlsPrepareStop",
+        "summary": "Stop preparing an HLS session",
+        "tags": [
+          "HLS"
+        ],
+        "description": "Needs `RIVULET_HLS_PREPARE`. Stops the session's preparation job, if any, and unpins its segments; the ones already cached stay, under the session's cache cap again. The session itself is kept.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "HLS session id (created by `GET /hlsv2/{id}/master.m3u8`)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Stopped (or nothing was running)"
+          },
+          "400": {
+            "description": "Invalid session id",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found: unknown session, or preparation is off (`RIVULET_HLS_PREPARE` unset); with it off this path is handled like any other `/hlsv2/{id}/{file}` request, which answers 404 for `prepare`.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Other error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      }
+    },
     "/hlsv2/{id}/{file}": {
       "get": {
         "operationId": "hlsFile",
@@ -3411,7 +3621,7 @@
         "tags": [
           "HLS"
         ],
-        "description": "Segments are transcoded on demand by ffmpeg. Playlists/segments are sent through `http.ServeFile` so Range/conditional requests yield 206/304/416. `/hlsv2/{id}` alone (GET) and any DELETE with two or more segments after `hlsv2` return the plain 404. Error mapping for non-master files: unknown session or any other failure -> 404; source failure -> 502; timeout -> 504. For `master.m3u8` every failure except an invalid override is a 500 (including a missing/blocked `mediaURL`, an invalid session id and the session limit).",
+        "description": "Segments are transcoded on demand by ffmpeg. Playlists/segments are sent through `http.ServeFile` so Range/conditional requests yield 206/304/416. `/hlsv2/{id}` alone (GET) and any DELETE with two or more segments after `hlsv2` return the plain 404, except `/hlsv2/{id}/prepare` with `RIVULET_HLS_PREPARE` on. Error mapping for non-master files: unknown session or any other failure -> 404; source failure -> 502; timeout -> 504. For `master.m3u8` every failure except an invalid override is a 500 (including a missing/blocked `mediaURL`, an invalid session id and the session limit).",
         "parameters": [
           {
             "name": "id",
@@ -10223,6 +10433,110 @@
         "required": [
           "flood",
           "pulse"
+        ]
+      },
+      "HLSPrepareIssue": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "reason"
+        ]
+      },
+      "HLSPrepareRendition": {
+        "type": "object",
+        "properties": {
+          "playlist": {
+            "type": "string",
+            "description": "`playlist.m3u8`, `video.m3u8` or `audio<k>.m3u8`"
+          },
+          "map": {
+            "type": "string",
+            "pattern": "^[cuf-]*$",
+            "description": "One character per segment: `c` cached, `-` not cached (not transcoded yet, or evicted), `u` transcoded but not cached (failed its output check), `f` transcode failed."
+          }
+        },
+        "required": [
+          "playlist",
+          "map"
+        ]
+      },
+      "HLSPrepareStatus": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "failed"
+            ]
+          },
+          "audio": {
+            "type": "string",
+            "enum": [
+              "default",
+              "all"
+            ]
+          },
+          "segments": {
+            "type": "integer",
+            "description": "Segments per rendition"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "cached": {
+            "type": "integer"
+          },
+          "uncached": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "cachedBytes": {
+            "type": "integer"
+          },
+          "estimatedBytes": {
+            "type": "integer",
+            "description": "Expected size of every prepared segment at the session's peak bitrate"
+          },
+          "error": {
+            "type": "string"
+          },
+          "renditions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HLSPrepareRendition"
+            }
+          },
+          "issues": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/HLSPrepareIssue"
+            }
+          }
+        },
+        "required": [
+          "state",
+          "segments",
+          "total",
+          "cached",
+          "uncached",
+          "failed",
+          "cachedBytes",
+          "estimatedBytes",
+          "renditions"
         ]
       },
       "HeartbeatResponse": {
