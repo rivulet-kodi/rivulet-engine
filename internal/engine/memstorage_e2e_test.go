@@ -43,9 +43,9 @@ func newPayloadTorrent(t *testing.T, dir string, pieceLen int64, numPieces int) 
 	return data, &metainfo.MetaInfo{InfoBytes: infoBytes}
 }
 
-// newMemEngine starts a manager with an in-RAM budget of budget bytes and adds
-// mi to it.
-func newMemEngine(t *testing.T, budget int64, mi *metainfo.MetaInfo) (*manager, *engine) {
+// newTestEngine starts a manager with an in-RAM budget of budget bytes (0: disk
+// storage) and adds mi to it.
+func newTestEngine(t *testing.T, budget int64, mi *metainfo.MetaInfo) (*manager, *engine) {
 	t.Helper()
 	cfg := newJanitorTestCfg(t)
 	cfg.MemoryCacheSize = budget
@@ -67,6 +67,83 @@ func newMemEngine(t *testing.T, budget int64, mi *metainfo.MetaInfo) (*manager, 
 	return em.(*manager), e
 }
 
+// TestStreamDownloadPolicyByStorage checks which pieces a stream makes anacrolix
+// want. On disk the played file is downloaded whole. With the in-RAM cache only
+// the stream's window, half the budget, is wanted, plus the boundary pieces:
+// a whole-file download made the capped request walk fetch the rarest pieces
+// anywhere in the file, which the cache evicted unplayed and peers' requests
+// for them then had downloaded again (plugin.video.rivulet#96).
+func TestStreamDownloadPolicyByStorage(t *testing.T) {
+	const (
+		pieceLen  = 256 << 10
+		numPieces = 256                   // 64 MiB: far more than the head and tail windows
+		budget    = 32 << 20              // its 16 MiB window is past readaheadFor's 8 MiB floor
+		window    = budget / 2 / pieceLen // pieces the in-RAM window covers
+		head      = int(headWindowBytes / pieceLen)
+		tail      = numPieces - int(tailWindowBytes/pieceLen)
+	)
+	_, mi := newPayloadTorrent(t, t.TempDir(), pieceLen, numPieces)
+	for _, tc := range []struct {
+		name   string
+		budget int64
+		beyond torrent.PiecePriority // a piece past the window and the boundaries
+	}{
+		{"disk", 0, torrent.PiecePriorityNormal},
+		{"memory", budget, torrent.PiecePriorityNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, e := newTestEngine(t, tc.budget, mi) // no peers: nothing downloads
+			r, _, err := e.NewReader(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The window applies once the stream reads; the read waits for data
+			// that never comes until Close ends it.
+			readDone := make(chan struct{})
+			go func() {
+				defer close(readDone)
+				_, _ = r.Read(make([]byte, 1))
+			}()
+			t.Cleanup(func() {
+				_ = r.Close()
+				<-readDone
+			})
+			prio := func(i int) torrent.PiecePriority { return e.t.Piece(i).State().Priority }
+			// A piece reads as priority none until its storage completion is
+			// known, and the window until the read has started (the first piece
+			// past the head window is in every stream's window).
+			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				settled := prio(head) >= torrent.PiecePriorityReadahead
+				for i := 0; settled && i < numPieces; i++ {
+					st := e.t.Piece(i).State()
+					settled = st.Ok && !st.Checking
+				}
+				if settled {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("pieces still checking, or the read not started, after 30 s")
+				}
+			}
+			if tc.budget > 0 {
+				for i := head; i < window; i++ {
+					if p := prio(i); p < torrent.PiecePriorityReadahead {
+						t.Fatalf("piece %d in the stream's window has priority %v, want at least readahead", i, p)
+					}
+				}
+			}
+			for _, i := range []int{window + 1, numPieces / 2, tail - 1} {
+				if p := prio(i); p != tc.beyond {
+					t.Errorf("piece %d beyond the window and boundaries has priority %v, want %v", i, p, tc.beyond)
+				}
+			}
+			if p := prio(tail); p != torrent.PiecePriorityNow {
+				t.Errorf("tail piece %d has priority %v, want now", tail, p)
+			}
+		})
+	}
+}
+
 // TestMemStorageClosingStalledReadReturns: closing a stream whose read is
 // waiting for data must end that read with an error. anacrolix retried every
 // failed read on capped storage by recursing, the cancelled context included,
@@ -74,7 +151,7 @@ func newMemEngine(t *testing.T, budget int64, mi *metainfo.MetaInfo) (*manager, 
 // cache on (fixed in the anacrolix reader, anacrolix/torrent#1168).
 func TestMemStorageClosingStalledReadReturns(t *testing.T) {
 	_, mi := newPayloadTorrent(t, t.TempDir(), 64<<10, 4)
-	_, e := newMemEngine(t, 1<<20, mi) // no peers: the data never arrives
+	_, e := newTestEngine(t, 1<<20, mi) // no peers: the data never arrives
 	r, _, err := e.NewReader(0)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +221,7 @@ func TestMemStorageStreamRecoversEvictedPieces(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m, e := newMemEngine(t, budget, mi)
+	m, e := newTestEngine(t, budget, mi)
 	var refetches atomic.Int64
 	m.mem.refetch = func(ih metainfo.Hash, piece int) <-chan struct{} {
 		refetches.Add(1)
