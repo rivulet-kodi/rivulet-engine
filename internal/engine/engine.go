@@ -228,9 +228,9 @@ type manager struct {
 	// btDownloadSpeedSoftLimit.
 	establishedConnsPerTorrent int
 
-	// refetching dedupes in-flight VerifyData re-downloads of evicted in-RAM
+	// refetching dedupes in-flight completion resyncs of evicted in-RAM
 	// pieces, keyed by refetchKey. The value is the chan struct{} closed when
-	// that verify has finished, which evicted reads wait on. Only exercised
+	// that resync has finished, which evicted reads wait on. Only exercised
 	// when the in-RAM cache is on.
 	refetching sync.Map
 
@@ -256,16 +256,22 @@ type refetchKey struct {
 }
 
 // refetchPiece forces anacrolix to re-download a piece whose in-RAM bytes were
-// evicted. memStorage.ReadAt calls it when an evicted piece is read: VerifyData
-// re-hashes the (now empty) piece, the hash fails, anacrolix clears the piece's
-// dirty-chunk bitmap and re-requests it, and the reader blocks for the
-// re-download instead of spinning reader.readAt into a stack overflow. Each
-// (infohash, piece) verify runs at most once concurrently.
+// evicted. memStorage.ReadAt calls it when an evicted piece is read:
+// UpdateCompletion re-reads the piece's completion from storage, which no
+// longer has it, so anacrolix drops its cached "complete", re-requests the
+// piece, and the reader waits for the re-download instead of retrying a read
+// that cannot succeed. Each (infohash, piece) resync runs at most once
+// concurrently.
 //
-// The returned channel is closed once that verify has finished (the piece is
+// It used to call VerifyData, which got there by hashing the empty piece: every
+// evicted read, a queued peer upload's included, then logged a failed hash
+// ("finished hashing piece ... correct=false", plugin.video.rivulet#96) and
+// bumped anacrolix's pieceHashedNotCorrect counter.
+//
+// The returned channel is closed once that resync has finished (the piece is
 // then pending a re-download), so the evicted read can wait on it instead of
-// polling; callers that join an in-flight verify get the same channel. It is
-// nil when there is no live torrent to verify.
+// polling; callers that join an in-flight resync get the same channel. It is
+// nil when there is no live torrent to resync.
 func (m *manager) refetchPiece(ih metainfo.Hash, piece int) <-chan struct{} {
 	key := ih.HexString()
 	m.mu.RLock()
@@ -289,11 +295,11 @@ func (m *manager) refetchPiece(ih metainfo.Hash, piece int) <-chan struct{} {
 	}
 	go func() {
 		// Deferred in this order so the dedupe entry is gone before waiters
-		// wake: a read that retries immediately starts a fresh verify.
+		// wake: a read that retries immediately starts a fresh resync.
 		defer close(done)
 		defer m.refetching.Delete(rk)
 		// Guard: re-check the engine is still active before calling
-		// VerifyData. A torrent that has been Drop()ped must not be used;
+		// UpdateCompletion. A torrent that has been Drop()ped must not be used;
 		// pointer identity avoids a false-positive when the same infohash
 		// is re-added as a new engine after a drop.
 		m.mu.RLock()
@@ -302,7 +308,7 @@ func (m *manager) refetchPiece(ih metainfo.Hash, piece int) <-chan struct{} {
 		if current != e {
 			return
 		}
-		_ = e.t.Piece(piece).VerifyData()
+		e.t.Piece(piece).UpdateCompletion()
 	}()
 	return done
 }

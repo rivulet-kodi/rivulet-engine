@@ -46,7 +46,10 @@ package engine
 //     player stream, which the engine reports through a memCursor, never a
 //     storage ReadAt: anacrolix serves peer uploads through ReadAt as well,
 //     and counting those reads let a peer's request write off the window
-//     just ahead of the player (see memCursor).
+//     just ahead of the player (see memCursor). The piece a player stream is
+//     reading is in neither class: it is pinned out of the heap until the
+//     stream moves on, since the next download evicted it mid-read once it
+//     was the only played piece left (memCursor.read).
 //
 // Concurrency model:
 //
@@ -74,22 +77,30 @@ package engine
 //   - A non-resident piece reports Completion{Ok: true, Complete: false}, and its
 //     ReadAt returns (0, errPieceEvicted), never (0, nil) — the storage.Piece /
 //     storagePieceReader wrappers panic on a (0, nil) read.
-//   - Evicting bytes is NOT enough on its own: anacrolix only clears a piece's
-//     dirty-chunk bitmap on hash *failure*, never on completion, so a completed
-//     piece keeps reading as "have" (reader.available stays > 0). reader.readAt
-//     then spin-retries the failing read forever (a stack overflow) instead of
-//     blocking, because it never sees the piece as unavailable. To close this we
-//     drive a real re-download: ReadAt on an evicted piece calls the refetch hook
-//     (wired by the manager to Torrent.Piece(i).VerifyData), which re-hashes the
-//     empty piece, fails, clears its dirty chunks, and re-requests it — so the
-//     reader blocks for the re-download. The hook returns a channel closed once
-//     that re-pend has landed; the evicted read waits for it (instead of polling
-//     on a fixed sleep) and returns, so anacrolix's next attempt sees the piece
-//     as unavailable and blocks until it is downloaded. The wait is capped by
-//     refetchBackoff, and repeated evicted reads of the same piece are throttled
-//     by an escalating floor, so anacrolix's retry recursion stays bounded even
-//     when the re-pend never lands. The hasher's own read of the evicted piece
-//     goes through WriteTo, which fails fast without waiting on itself.
+//   - Evicting bytes is NOT enough on its own: anacrolix caches each piece's
+//     completion and is not told of an eviction, so an evicted piece keeps
+//     reading as available and reader.readAt retries the failing storage read
+//     instead of waiting for the data. To close this, ReadAt on an evicted
+//     piece calls the refetch hook (wired by the manager to
+//     Torrent.Piece(i).UpdateCompletion), which re-reads the completion from
+//     this storage: the piece turns incomplete, anacrolix re-requests it, and
+//     the reader waits for the re-download. The hook returns a channel closed
+//     once that resync has landed; the evicted read waits for it (instead of
+//     polling on a fixed sleep) and returns, so anacrolix's next attempt sees
+//     the piece as unavailable and blocks until it is downloaded. The wait is
+//     capped by refetchBackoff, and repeated evicted reads of the same piece
+//     are throttled by an escalating floor, so anacrolix's retry recursion
+//     stays bounded even when the resync never lands. The hook used to
+//     re-hash the piece (VerifyData), which failed on the empty piece and
+//     logged a "finished hashing piece ... correct=false" per evicted read,
+//     peer uploads included (plugin.video.rivulet#96). The hasher's own read of
+//     an evicted piece goes through WriteTo, which fails fast without waiting.
+//   - anacrolix's reader retried every failed read on capped storage, by
+//     recursion, including a wait that failed because the stream's context
+//     ended or the torrent closed: closing a stream whose read was waiting for
+//     a piece overflowed the stack. go.mod replaces anacrolix with the
+//     M0Rf30/torrent fork carrying the fix (anacrolix/torrent#1168) until it
+//     lands upstream.
 //   - We only ever evict COMPLETE pieces, so in-flight (partially written)
 //     pieces are never dropped and anacrolix's chunk bookkeeping is never
 //     invalidated mid-download.
@@ -487,13 +498,16 @@ type memCursor struct {
 	mt *memTorrent
 
 	// pos is the last piece this stream read (-1 before its first read) and
-	// closed is set by close. Both guarded by store.mu.
+	// closed is set by close. pinned is the piece the stream is reading now,
+	// held out of eviction until the stream moves past it (nil when there is
+	// none resident to hold). All guarded by store.mu.
 	pos    int
 	closed bool
+	pinned *memPiece
 
-	// seen is the last piece reported, owned by the reading goroutine (a
-	// stream is read by one goroutine at a time), so a run of reads within
-	// one piece takes no lock.
+	// seen is the piece the stream holds pinned (-1 when none), owned by the
+	// reading goroutine (a stream is read by one goroutine at a time), so a
+	// run of reads within one piece takes no lock.
 	seen int
 }
 
@@ -515,30 +529,56 @@ func (s *memStorage) openCursor(ih string) *memCursor {
 	return c
 }
 
-// read records that the stream read pieces first..last: each resident complete
-// piece among them moves to the consumed class with the newest tick, and the
-// stream's position becomes last. A nil cursor is a no-op.
+// read records that the stream read pieces first..last. Each resident complete
+// piece it has moved past (first..last-1, and the piece it held pinned until
+// now) moves to the consumed class with the newest tick; last, the piece it is
+// reading now, is pinned; and the stream's position becomes last. A nil cursor
+// is a no-op.
+//
+// The current piece is pinned rather than consumed because consumed pieces are
+// the first victims: once the played pieces behind the reader were gone, the
+// piece being played was the only consumed one left, and the next piece to
+// download evicted it under the player mid-read — the repeated
+// "initial read failed" refetches of rivulet-kodi/plugin.video.rivulet#96 with
+// a full budget.
 func (c *memCursor) read(first, last int) {
 	if c == nil || (first == c.seen && last == c.seen) {
 		return
 	}
-	c.seen = last
 	s := c.mt.store
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c.closed || c.mt.closed {
 		return
 	}
-	for i := max(first, 0); i <= last && i < len(c.mt.pieces); i++ {
+	for i := max(first, 0); i < last && i < len(c.mt.pieces); i++ {
 		if mp := c.mt.pieces[i].Load(); mp != nil && mp.lruIdx >= 0 {
 			s.consumeLocked(mp)
 		}
 	}
 	c.pos = last
 	c.mt.updateReadPosLocked()
+	var cur *memPiece
+	if last >= 0 && last < len(c.mt.pieces) {
+		cur = c.mt.pieces[last].Load()
+	}
+	if cur != c.pinned {
+		s.unpinLocked(c.pinned, true)
+		c.pinned = nil
+		if cur != nil && s.pinLocked(cur) {
+			c.pinned = cur
+		}
+	}
+	// Skip the lock for further reads only while the piece is held: a piece
+	// evicted between the read and this call is pinned once it is back.
+	c.seen = -1
+	if c.pinned != nil {
+		c.seen = last
+	}
 }
 
-// close unregisters the stream; its position no longer holds back readPos.
+// close unregisters the stream; its position no longer holds back readPos, and
+// the piece it held returns to the class it had (the stream did not finish it).
 // Idempotent; a nil cursor is a no-op.
 func (c *memCursor) close() {
 	if c == nil {
@@ -551,8 +591,57 @@ func (c *memCursor) close() {
 		return
 	}
 	c.closed = true
+	s.unpinLocked(c.pinned, false)
+	c.pinned = nil
 	delete(c.mt.cursors, c)
 	c.mt.updateReadPosLocked()
+}
+
+// pinLocked holds mp out of eviction while a stream reads it, and reports
+// whether it did: a piece that is not resident and complete has nothing to
+// hold. Pins nest (two streams in one piece). A piece is in the eviction heap
+// exactly while it is resident, complete and unpinned. Caller holds s.mu.
+func (s *memStorage) pinLocked(mp *memPiece) bool {
+	if mp.pins == 0 {
+		if mp.lruIdx < 0 {
+			return false
+		}
+		heap.Remove(&s.lru, mp.lruIdx)
+	}
+	mp.pins++
+	return true
+}
+
+// unpinLocked releases one pin on mp (a nil mp is a no-op). Once the last pin
+// goes, a piece still resident and complete re-enters the eviction heap: in
+// the consumed class with the newest tick when played (the stream moved past
+// it), else in the class it had. Caller holds s.mu.
+func (s *memStorage) unpinLocked(mp *memPiece, played bool) {
+	if mp == nil {
+		return
+	}
+	mp.pins--
+	if mp.pins > 0 {
+		return
+	}
+	mp.mu.RLock()
+	resident := mp.complete && mp.data != nil
+	mp.mu.RUnlock()
+	if !resident {
+		return
+	}
+	switch {
+	case played:
+		stamp := s.tick.Add(1)
+		mp.lastUsed.Store(stamp)
+		mp.consumed.Store(true)
+		mp.key = stamp
+	case mp.consumed.Load():
+		mp.key = mp.lastUsed.Load()
+	default:
+		mp.key = aheadKey(mp.index)
+	}
+	heap.Push(&s.lru, mp)
 }
 
 // piece returns the (lazily created) memPiece for p. anacrolix calls it for
@@ -614,17 +703,20 @@ type memPiece struct {
 	// least-recently-read consumed piece.
 	lastUsed atomic.Int64
 
-	// consumed is true once a player stream has read this piece (reported by
-	// its memCursor, not by ReadAt, which peer uploads share); until then a
-	// complete piece is read-ahead and evicted last. Set under store.mu,
-	// cleared when the buffer is freed or the piece re-completes; loaded
-	// lock-free by stamp.
+	// consumed is true once a player stream has moved past this piece
+	// (reported by its memCursor, not by ReadAt, which peer uploads share);
+	// until then a complete piece is read-ahead and evicted last. Set under
+	// store.mu, cleared when the buffer is freed or the piece re-completes;
+	// loaded lock-free by stamp.
 	consumed atomic.Bool
 
 	// key and lruIdx are the piece's heap key (a lower bound of lastUsed) and
-	// position in store.lru (-1 when not in the LRU). Guarded by store.mu.
+	// position in store.lru (-1 when not in the LRU). pins counts the streams
+	// reading this piece now (see memCursor.pinned); a pinned piece stays out
+	// of the LRU. Guarded by store.mu.
 	key    int64
 	lruIdx int
+	pins   int
 
 	// evictedReads counts consecutive reads that found the piece non-resident
 	// in rapid succession (a retry spin), and evictedAt is when the last such
@@ -715,15 +807,15 @@ func (mp *memPiece) ReadAt(b []byte, off int64) (int, error) {
 	if !evicted {
 		// Resident piece, offset at/past piece end — legitimate EOF; the
 		// read is satisfied and anacrolix will not spin on this path.
-		// Returning immediately avoids a spurious VerifyData call and the
-		// backoff that were incorrectly applied to this branch.
+		// Returning immediately avoids a spurious refetch and the backoff
+		// that were incorrectly applied to this branch.
 		return 0, io.EOF
 	}
 	// Only the genuine evicted-piece case reaches here. Force a re-download:
-	// VerifyData re-hashes the (now empty) piece, the hash fails, anacrolix
-	// clears the piece's dirty-chunk bitmap and re-requests it, so
-	// reader.readAt blocks on the re-fetch instead of recursing into a stack
-	// overflow. Wait until that has landed rather than sleeping blindly.
+	// the hook resyncs anacrolix's cached completion from this storage, the
+	// piece turns incomplete and is re-requested, so reader.readAt waits for
+	// the re-fetch instead of retrying a read that cannot succeed. Wait until
+	// that has landed rather than sleeping blindly.
 	if s.refetch != nil {
 		mp.waitRefetch(s.refetch(mp.mt.infoHash, mp.index), s.refetchBackoff)
 	}
@@ -768,9 +860,9 @@ func (mp *memPiece) waitRefetch(done <-chan struct{}, backoff time.Duration) {
 }
 
 // WriteTo streams the resident bytes to w (io.WriterTo). anacrolix hashes a
-// piece through it; implementing it lets the hasher read an evicted piece
-// without going through ReadAt, whose refetch wait would otherwise block the
-// very VerifyData that is meant to clear it. A non-resident piece fails fast
+// piece through it; implementing it keeps a hash of an evicted piece (a
+// VerifyData) out of ReadAt, whose refetch wait would stall the hasher on a
+// re-download while the hash can only fail. A non-resident piece fails fast
 // with errPieceEvicted (so the hash fails and the piece is re-requested). The
 // copy goes through a bounded scratch buffer so w is never called with the
 // piece lock held and a slow writer cannot stall eviction.
@@ -823,7 +915,7 @@ func (mp *memPiece) MarkComplete() error {
 	mp.key = aheadKey(mp.index)
 	if mp.lruIdx >= 0 {
 		heap.Fix(&s.lru, mp.lruIdx)
-	} else {
+	} else if mp.pins == 0 { // a pinned piece re-enters the LRU on unpin
 		heap.Push(&s.lru, mp)
 	}
 	mp.evictedReads.Store(0)

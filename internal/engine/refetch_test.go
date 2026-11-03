@@ -12,11 +12,11 @@ import (
 	"github.com/rivulet-kodi/rivulet-engine/internal/types"
 )
 
-// TestRefetchPieceNothingToVerify: with no live torrent (unknown engine) or no
+// TestRefetchPieceNothingToResync: with no live torrent (unknown engine) or no
 // such piece (metadata not fetched yet, or an out-of-range index) there is no
-// verify to wait for, so the hook returns a nil channel and starts nothing; the
+// resync to wait for, so the hook returns a nil channel and starts nothing; the
 // evicted read then falls back to the plain backoff sleep.
-func TestRefetchPieceNothingToVerify(t *testing.T) {
+func TestRefetchPieceNothingToResync(t *testing.T) {
 	em, err := New(newJanitorTestCfg(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
