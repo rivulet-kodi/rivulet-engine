@@ -114,3 +114,5 @@ require (
 	modernc.org/sqlite v1.61.0 // indirect
 	zombiezen.com/go/sqlite v1.4.2 // indirect
 )
+
+replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20261103191232-04ac8ed3c7d8

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"slices"
 	"testing"
 
 	"github.com/anacrolix/torrent"
@@ -30,9 +31,10 @@ var _ torrent.Reader = sliceTorrentReader{}
 
 // TestPinnedReaderReportsPiecesToCursor checks the stream-offset to piece
 // mapping that tells the in-RAM cache what the player has read: the file's
-// torrent offset is added, a read straddling a piece boundary consumes both
-// pieces, and a seek moves the position, so pieces it jumped over stay
-// read-ahead and the stream's position is the piece it now reads.
+// torrent offset is added, a read straddling a piece boundary consumes the
+// piece it left and pins the one it entered, and a seek moves the position, so
+// pieces it jumped over stay read-ahead and the stream's position (and pin) is
+// the piece it now reads.
 func TestPinnedReaderReportsPiecesToCursor(t *testing.T) {
 	const (
 		pieceLen  = 100
@@ -68,21 +70,24 @@ func TestPinnedReaderReportsPiecesToCursor(t *testing.T) {
 			t.Fatalf("Read(%d) = (%d, %v)", n, got, err)
 		}
 	}
-	check := func(readPos int, consumed ...int) {
+	check := func(readPos, pinned int, consumed ...int) {
 		t.Helper()
 		s.mu.Lock()
-		gotPos := cur.mt.readPos
-		s.mu.Unlock()
-		if gotPos != readPos {
+		defer s.mu.Unlock()
+		if gotPos := cur.mt.readPos; gotPos != readPos {
 			t.Fatalf("readPos = %d, want %d", gotPos, readPos)
 		}
 		for idx := 2; idx <= 6; idx++ {
-			want := false
-			for _, c := range consumed {
-				want = want || c == idx
-			}
-			if got := cur.mt.pieces[idx].Load().consumed.Load(); got != want {
+			mp := cur.mt.pieces[idx].Load()
+			if got, want := mp.consumed.Load(), slices.Contains(consumed, idx); got != want {
 				t.Fatalf("piece %d consumed = %v, want %v", idx, got, want)
+			}
+			want := 0
+			if idx == pinned {
+				want = 1 // the piece being read
+			}
+			if mp.pins != want {
+				t.Fatalf("piece %d pins = %d, want %d", idx, mp.pins, want)
 			}
 		}
 	}
@@ -90,10 +95,10 @@ func TestPinnedReaderReportsPiecesToCursor(t *testing.T) {
 	read(40) // torrent bytes 250..289
 	check(2, 2)
 	read(20) // 290..309: straddles into piece 3
-	check(3, 2, 3)
+	check(3, 3, 2)
 	if _, err := pr.Seek(300, io.SeekStart); err != nil { // torrent offset 550
 		t.Fatal(err)
 	}
 	read(1)
-	check(5, 2, 3, 5) // piece 4 was jumped over: still read-ahead
+	check(5, 5, 2, 3) // piece 4 was jumped over: still read-ahead
 }

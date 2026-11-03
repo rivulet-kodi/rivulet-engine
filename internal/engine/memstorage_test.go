@@ -126,7 +126,9 @@ func TestMemStorageWriteCompleteRead(t *testing.T) {
 // rivulet-kodi/plugin.video.rivulet#96: under plain LRU a read-ahead piece kept
 // its (older) completion stamp while the pieces being played took newer read
 // stamps, so the window ahead of the reader was evicted first and a 4K stream
-// stalled re-downloading the pieces it was about to read.
+// stalled re-downloading the pieces it was about to read. Its follow-up: the
+// piece being read must not go either, even when it is the only played piece
+// left (it used to be, and the player re-fetched it mid-read).
 func TestMemStorageEvictsPlayedBeforeReadAhead(t *testing.T) {
 	const (
 		pieceLen  = 256
@@ -182,24 +184,21 @@ func TestMemStorageEvictsPlayedBeforeReadAhead(t *testing.T) {
 		t.Fatal("evicted p0 ReadAt returned nil error; must signal not-resident so anacrolix re-fetches")
 	}
 
+	// No played piece is left but p1, which the player is still reading: it
+	// is held, and the piece the reader needs last goes instead.
 	writeComplete(4)
-	resident(2, 3, 4) // the remaining played piece goes next
-
-	// Only read-ahead left: the piece the reader needs last goes first.
+	resident(1, 2, 4)
 	writeComplete(5)
-	resident(2, 3, 5)
+	resident(1, 2, 5)
 
+	// A forward seek to p5: p1, now played, goes first again, and the unread
+	// p2 is behind the reader, so it leads the read-ahead class even though
+	// p6 is farther ahead.
+	read(5)
 	writeComplete(6)
-	resident(2, 3, 6)
-
-	// A forward seek to p6: once played it is evicted first again, and the
-	// unread p2 and p3 are now behind the reader, so they lead the read-ahead
-	// class even though p7 is farther ahead.
-	read(6)
+	resident(2, 5, 6)
 	writeComplete(7)
-	resident(2, 3, 7)
-	writeComplete(0)
-	resident(0, 3, 7)
+	resident(5, 6, 7)
 }
 
 // TestMemStorageOnlyPlayerReadsShapeEviction is the regression for the
@@ -250,36 +249,37 @@ func TestMemStorageOnlyPlayerReadsShapeEviction(t *testing.T) {
 	for idx := range 6 {
 		writeComplete(idx)
 	}
-	readAt(0)
-	player.read(0, 0)
-	readAt(5) // a peer's upload request for a read-ahead piece
+	for _, idx := range []int{0, 1} { // the player plays p0 and is reading p1
+		readAt(idx)
+		player.read(idx, idx)
+	}
+	readAt(3) // a peer's upload request for a read-ahead piece
 
 	writeComplete(6)
 	resident(1, 2, 3, 4, 5, 6) // the played p0 goes
-	// Only read-ahead left: the farthest ahead goes, not the uploaded p5 nor
-	// the p1 the player reads next.
+	// Only read-ahead left: the farthest ahead goes, not the uploaded p3.
 	writeComplete(7)
 	resident(1, 2, 3, 4, 5, 7)
 
-	// A probe stream reads p7, far ahead of the player. It consumed p7, so p7
-	// goes first; then the player's window must still not read as skipped.
+	// A probe stream reads p7, far ahead of the player, and holds it; the
+	// player's window must still not read as skipped by the probe's position.
 	probe := openTestCursor(t, s, 2)
 	readAt(7)
 	probe.read(7, 7)
 	writeComplete(8)
-	resident(1, 2, 3, 4, 5, 8)
+	resident(1, 2, 3, 4, 7, 8)
 	writeComplete(9)
-	resident(1, 2, 3, 4, 5, 9)
+	resident(1, 2, 3, 4, 7, 9)
 
-	// The player seeks forward to p4: with the probe closed, p1..p3 are now
+	// The probe closes and the player seeks forward to p4: p2 and p3 are now
 	// behind every stream and go before anything ahead of it.
 	probe.close()
 	readAt(4)
 	player.read(4, 4)
 	writeComplete(10)
-	resident(1, 2, 3, 5, 9, 10) // the played p4 goes first
+	resident(2, 3, 4, 7, 9, 10) // the played p1 goes first
 	writeComplete(11)
-	resident(2, 3, 5, 9, 10, 11) // then the skipped pieces, lowest first
+	resident(3, 4, 7, 9, 10, 11) // then the skipped pieces, lowest first
 }
 
 // TestMemStorageConcurrentNeverWrongBytes hammers the backend from many
@@ -728,7 +728,7 @@ func TestMemStorageEvictedReadTriggersRefetch(t *testing.T) {
 // read at/after its end returns the standard (0, io.EOF) io.ReaderAt result
 // WITHOUT invoking the refetch+backoff guard. io.EOF is terminal, so anacrolix
 // does not spin on it; firing refetch (and the 100 ms backoff) on this branch
-// would add a spurious VerifyData call and latency to every legitimate
+// would add a spurious completion resync and latency to every legitimate
 // end-of-piece read. The refetch guard is reserved for genuinely evicted
 // pieces (covered by TestMemStorageEvictedReadTriggersRefetch).
 func TestMemStoragePastEndReadNoRefetch(t *testing.T) {
@@ -815,11 +815,11 @@ func openTestCursor(t *testing.T, s *memStorage, id byte) *memCursor {
 
 // TestMemStorageEvictionMatchesModel drives a random mix of completions and
 // reads and checks, after every step, that the resident set equals a reference
-// model of the eviction policy: consumed (read) pieces go first, least recently
-// read first; then read-ahead pieces below the reader position, lowest index
-// first; then the read-ahead piece farthest ahead. The heap, its lazily
-// refreshed keys and the ahead scan must agree with it however reads and
-// completions interleave.
+// model of the eviction policy: the piece the stream is reading is held;
+// played pieces go first, least recently played first; then read-ahead pieces
+// below the reader position, lowest index first; then the read-ahead piece
+// farthest ahead. The heap, its lazily refreshed keys, the pins and the ahead
+// scan must agree with it however reads and completions interleave.
 func TestMemStorageEvictionMatchesModel(t *testing.T) {
 	const (
 		pieceLen  = 64
@@ -837,10 +837,13 @@ func TestMemStorageEvictionMatchesModel(t *testing.T) {
 	}
 
 	rng := rand.New(rand.NewPCG(7, 7))
-	var consumed []int      // read pieces, least recently read first
+	var consumed []int      // played pieces, least recently played first
 	ahead := map[int]bool{} // complete, not yet read
 	readPos := -1           // index of the stream's last read piece
-	isResident := func(idx int) bool { return ahead[idx] || slices.Contains(consumed, idx) }
+	pinned := -1            // the piece the stream is reading: never a victim
+	isResident := func(idx int) bool {
+		return idx == pinned || ahead[idx] || slices.Contains(consumed, idx)
+	}
 	evict := func() {
 		if len(consumed) > 0 {
 			consumed = consumed[1:]
@@ -861,6 +864,9 @@ func TestMemStorageEvictionMatchesModel(t *testing.T) {
 	buf := make([]byte, 8)
 	for step := range steps {
 		n := len(consumed) + len(ahead)
+		if pinned >= 0 {
+			n++
+		}
 		if n > 0 && rng.IntN(3) > 0 {
 			idx := rng.IntN(numPieces)
 			for !isResident(idx) {
@@ -871,12 +877,16 @@ func TestMemStorageEvictionMatchesModel(t *testing.T) {
 			}
 			cur.read(idx, idx)
 			readPos = idx
-			if ahead[idx] {
+			if idx != pinned {
+				// The stream moved on: the piece it held is played, newest;
+				// the one it reads now is held.
+				if pinned >= 0 {
+					consumed = append(consumed, pinned)
+				}
 				delete(ahead, idx)
-			} else {
 				consumed = slices.DeleteFunc(consumed, func(v int) bool { return v == idx })
+				pinned = idx
 			}
-			consumed = append(consumed, idx)
 		} else {
 			idx := rng.IntN(numPieces)
 			if isResident(idx) {
@@ -1068,9 +1078,9 @@ func TestMemStorageStressAccounting(t *testing.T) {
 
 // TestMemStorageWriteTo covers the io.WriterTo fast path the hasher uses: a
 // resident piece streams its exact bytes, a non-resident one fails fast with
-// errPieceEvicted without invoking the refetch hook or waiting (the hook's own
-// VerifyData is what is hashing, so waiting would block on itself), and writer
-// errors surface.
+// errPieceEvicted without invoking the refetch hook or waiting (the hash of a
+// non-resident piece can only fail, so waiting would only stall the hasher),
+// and writer errors surface.
 func TestMemStorageWriteTo(t *testing.T) {
 	const pieceLen = 3*writeToChunk + 123 // several scratch chunks plus a remainder
 	s := newMemStorage(2 * pieceLen)
@@ -1107,11 +1117,14 @@ func TestMemStorageWriteTo(t *testing.T) {
 		t.Fatalf("WriteTo(short writer) err = %v, want io.ErrShortWrite", err)
 	}
 
-	// Evict p0 by playing it, then completing p1 and p2 in a two-piece budget.
+	// Evict p0 by playing it (reading it, then moving on to p1), then
+	// completing p1 and p2 in a two-piece budget.
 	if _, err := readFull(p0, pieceLen); err != nil {
 		t.Fatal(err)
 	}
-	openTestCursor(t, s, 1).read(0, 0)
+	cur := openTestCursor(t, s, 1)
+	cur.read(0, 0)
+	cur.read(1, 1)
 	for _, idx := range []int{1, 2} {
 		p := ti.Piece(info.Piece(idx))
 		if _, err := p.WriteAt(make([]byte, pieceLen), 0); err != nil {
