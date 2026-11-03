@@ -1680,6 +1680,12 @@ func (s *server) handleHLSProbe(w http.ResponseWriter, r *http.Request) {
 // unknown or mis-cased query parameters are ignored, and a repeated
 // parameter uses its first value.
 func (s *server) handleHLS(w http.ResponseWriter, r *http.Request, seg []string) {
+	if len(seg) == 3 && seg[2] == "prepare" {
+		if p, ok := s.prober.(types.HLSPreparer); ok && p.HLSPrepareEnabled() {
+			s.handleHLSPrepare(w, r, p, seg[1])
+			return
+		}
+	}
 	if r.Method == http.MethodDelete {
 		s.handleHLSDelete(w, r, seg)
 		return
@@ -1755,6 +1761,59 @@ func (s *server) handleHLSDelete(w http.ResponseWriter, r *http.Request, seg []s
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// handleHLSPrepare serves /hlsv2/{id}/prepare when engine-side preparation
+// is on (RIVULET_HLS_PREPARE): POST starts the session's preparation job
+// (?audio=default|all), GET reports its progress and per-segment cache
+// status, DELETE stops it and unpins its segments. POST and GET answer with
+// the status JSON (202 and 200), DELETE with 204. Errors: 400 invalid id or
+// audio, 404 unknown session, 409 duration unknown, 507 the session can't
+// fit in RIVULET_HLS_SEGMENT_CACHE_BYTES, 405 any other method.
+func (s *server) handleHLSPrepare(w http.ResponseWriter, r *http.Request, p types.HLSPreparer, id string) {
+	var (
+		st  types.HLSPrepareStatus
+		err error
+	)
+	code := http.StatusOK
+	switch r.Method {
+	case http.MethodPost:
+		st, err = p.PrepareHLS(id, r.URL.Query().Get("audio"))
+		code = http.StatusAccepted
+	case http.MethodGet, http.MethodHead:
+		st, err = p.HLSPrepareStatus(id)
+	case http.MethodDelete:
+		err = p.StopPrepareHLS(id)
+		code = http.StatusNoContent
+	default:
+		w.Header().Set("Allow", "GET, HEAD, POST, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	switch {
+	case err == nil:
+	case errors.Is(err, types.ErrHLSInvalidSessionID), errors.Is(err, types.ErrInvalidHLSOption):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case errors.Is(err, types.ErrHLSSessionNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	case errors.Is(err, types.ErrHLSDurationUnknown):
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	case errors.Is(err, types.ErrHLSPrepareTooLarge):
+		http.Error(w, err.Error(), http.StatusInsufficientStorage)
+		return
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if code == http.StatusNoContent {
+		w.WriteHeader(code)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	writeJSON(w, code, st)
 }
 
 func (s *server) handleTracks(w http.ResponseWriter, r *http.Request, seg []string) {

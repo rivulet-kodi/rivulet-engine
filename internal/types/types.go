@@ -409,4 +409,79 @@ var (
 	// time: its origin timed out, or the transcode ran past its overall
 	// deadline (slow encodes count too). The HTTP layer answers 504.
 	ErrHLSSegmentTimeout = errors.New("segment timed out")
+	// ErrHLSDurationUnknown reports that a session cannot be prepared
+	// because its media duration is unknown (the probe failed). The HTTP
+	// layer answers 409.
+	ErrHLSDurationUnknown = errors.New("session duration unknown")
+	// ErrHLSPrepareTooLarge reports that a prepared session would not fit
+	// in the configured per-session segment cache cap
+	// (RIVULET_HLS_SEGMENT_CACHE_BYTES). The HTTP layer answers 507.
+	ErrHLSPrepareTooLarge = errors.New("prepared session would exceed the segment cache cap")
 )
+
+// HLSPreparer is implemented by a MediaProber that supports engine-side
+// preparation (POST /hlsv2/{id}/prepare, RIVULET_HLS_PREPARE). The HTTP layer
+// finds it with a type assertion; while HLSPrepareEnabled reports false the
+// prepare routes answer exactly as they did before the feature existed.
+type HLSPreparer interface {
+	HLSPrepareEnabled() bool
+	// PrepareHLS starts (or keeps running) the preparation job of session
+	// id. audio is "default" (or "") or "all", and selects which audio
+	// renditions of a multi-audio session are prepared besides the video.
+	PrepareHLS(id, audio string) (HLSPrepareStatus, error)
+	// HLSPrepareStatus reports session id's preparation progress and the
+	// cache status of each segment, whether or not a job was started.
+	HLSPrepareStatus(id string) (HLSPrepareStatus, error)
+	// StopPrepareHLS stops session id's preparation job, if any, and unpins
+	// its segments; those already cached stay cached.
+	StopPrepareHLS(id string) error
+}
+
+// HLSPrepareStatus is the JSON body of the /hlsv2/{id}/prepare routes.
+type HLSPrepareStatus struct {
+	// State is "idle" (no job requested, or stopped), "running", "done"
+	// (every segment was attempted; see Cached against Total) or "failed"
+	// (stopped after repeated transcode errors; see Error).
+	State string `json:"state"`
+	// Audio is the audio selection of the requested job ("default" or
+	// "all"); empty while idle.
+	Audio string `json:"audio,omitempty"`
+	// Segments is the number of segments in each rendition.
+	Segments int `json:"segments"`
+	// Total counts the segment files to prepare across Renditions; Cached,
+	// Uncached and Failed count them by their Map status.
+	Total    int `json:"total"`
+	Cached   int `json:"cached"`
+	Uncached int `json:"uncached"`
+	Failed   int `json:"failed"`
+	// CachedBytes is the size on disk of the cached segments counted in
+	// Cached; EstimatedBytes is the expected size of all Total of them at
+	// the session's peak bitrate.
+	CachedBytes    int64 `json:"cachedBytes"`
+	EstimatedBytes int64 `json:"estimatedBytes"`
+	// Error is why a failed job stopped.
+	Error      string                `json:"error,omitempty"`
+	Renditions []HLSPrepareRendition `json:"renditions"`
+	// Issues lists, for up to 100 segments, why a segment is uncached or
+	// failed.
+	Issues []HLSPrepareIssue `json:"issues,omitempty"`
+}
+
+// HLSPrepareRendition is one prepared playlist and the status of each of its
+// segments.
+type HLSPrepareRendition struct {
+	// Playlist is the media playlist the segments belong to
+	// (playlist.m3u8, video.m3u8 or audio<k>.m3u8).
+	Playlist string `json:"playlist"`
+	// Map has one character per segment, in order: 'c' cached, '-' not
+	// cached (not transcoded yet, or evicted), 'u' transcoded but not
+	// cached because the output failed its check (see Issues), 'f' the
+	// transcode failed (see Issues).
+	Map string `json:"map"`
+}
+
+// HLSPrepareIssue explains one uncached or failed segment.
+type HLSPrepareIssue struct {
+	File   string `json:"file"`
+	Reason string `json:"reason"`
+}

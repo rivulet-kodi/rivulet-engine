@@ -51,6 +51,18 @@ type HLSConfig struct {
 	// process rehydrate it without re-probing or re-transcoding. Requires
 	// WorkDir; ignored (with a warning) without it. See persist.go.
 	Persist bool // (RIVULET_HLS_PERSIST)
+	// Prepare opts in to engine-side preparation: POST /hlsv2/{id}/prepare
+	// starts a background job that transcodes every segment of a session
+	// at low priority and pins them in its cache, with progress and
+	// per-segment cache status on GET (RIVULET_HLS_PREPARE). false (the
+	// default) leaves those routes answering 404 exactly as before. See
+	// prepare.go.
+	Prepare bool
+	// PrepareConcurrency is the most segment transcodes preparation runs at
+	// once across every session (RIVULET_HLS_PREPARE_CONCURRENCY). They share
+	// the SegmentConcurrency slots with live requests but only take one
+	// while no live request is waiting for it. 0 resolves to 1.
+	PrepareConcurrency int
 
 	// --- output quality / bandwidth ---
 	VideoBitrate string // -b:v, e.g. "8M" (RIVULET_TRANSCODE_VIDEO_BITRATE)
@@ -119,6 +131,10 @@ type HLSConfig struct {
 	// refused.
 	PrivateAllow *netguard.Allow
 }
+
+// defaultPrepareConcurrency keeps preparation to one background transcode at
+// a time, so live sessions keep the rest of the slots.
+const defaultPrepareConcurrency = 1
 
 // SeekPrerollNone is the HLSConfig.SeekPreroll value meaning "no pre-roll"
 // (pure input seek). A literal 0 cannot carry that meaning because 0 is the
@@ -196,6 +212,7 @@ func DefaultHLSConfig() HLSConfig {
 		AudioChannels:      defaultAudioChannels,
 		AudioBitrate:       defaultAudioBitrate,
 		SegmentConcurrency: 0,
+		PrepareConcurrency: defaultPrepareConcurrency,
 		VAAPIDevice:        defaultVAAPIDevice,
 		SegmentTimeout:     defaultSegmentTimeout,
 		SubtitleTimeout:    defaultSubtitleTTL,
@@ -282,6 +299,9 @@ func (c HLSConfig) normalize(numCPU int) HLSConfig {
 	}
 	if c.VAAPIDevice == "" {
 		c.VAAPIDevice = d.VAAPIDevice
+	}
+	if c.PrepareConcurrency <= 0 {
+		c.PrepareConcurrency = defaultPrepareConcurrency
 	}
 	if c.SegmentTimeout <= 0 {
 		c.SegmentTimeout = d.SegmentTimeout
