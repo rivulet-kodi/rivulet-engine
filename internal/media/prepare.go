@@ -633,7 +633,7 @@ func readPrepFile(dir string) (audio string, ok bool, err error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&rec); err != nil {
-		return "", false, fmt.Errorf("%w: decode %s: %v", errPrepInvalid, prepFileName, err)
+		return "", false, fmt.Errorf("%w: decode %s: %w", errPrepInvalid, prepFileName, err)
 	}
 	if rec.Audio != prepAudioDefault && rec.Audio != prepAudioAll {
 		return "", false, fmt.Errorf("%w: %s: invalid audio %q", errPrepInvalid, prepFileName, rec.Audio)
