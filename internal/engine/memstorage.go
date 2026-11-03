@@ -27,7 +27,10 @@ package engine
 //     fit in the budget are ever requested; as a reader advances, the window
 //     slides forward. Sharing one Capacity pointer across torrents makes the
 //     budget global (torrent-piece-request-order.go keys the shared request
-//     order on the Capacity pointer).
+//     order on the Capacity pointer). The walk counts every piece it passes,
+//     complete or evicted, so only what a stream is about to read is wanted:
+//     the file is not downloaded whole, and the stream's window is half the
+//     budget (engine.ensureDownloading, engine.streamReadahead).
 //
 //  2. A hard byte cap enforced by this storage via eviction of COMPLETE
 //     pieces. On a write that would exceed the budget we free complete

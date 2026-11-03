@@ -130,13 +130,14 @@ type engine struct {
 	cachedSources []types.Source   // Sources skeleton cached alongside cachedURLs under annoMu
 }
 
-// ensureDownloading marks file idx for full background download and demotes any
-// previously-selected file that no longer has an open reader back to
-// PiecePriorityNone. Streaming clients read one file at a time; without this,
-// every file the user has ever clicked keeps downloading forever, so the
-// available bandwidth fragments across all of them and the file actually being
-// played cannot win its leading pieces — playback stalls even while the torrent
-// downloads fast. Files with a live reader are never demoted.
+// ensureDownloading marks file idx for full background download (on disk; see
+// below for the in-RAM cache) and demotes any previously-selected file that no
+// longer has an open reader back to PiecePriorityNone. Streaming clients read
+// one file at a time; without this, every file the user has ever clicked keeps
+// downloading forever, so the available bandwidth fragments across all of them
+// and the file actually being played cannot win its leading pieces — playback
+// stalls even while the torrent downloads fast. Files with a live reader are
+// never demoted.
 func (e *engine) ensureDownloading(idx int) {
 	if idx < 0 {
 		return
@@ -180,7 +181,14 @@ func (e *engine) ensureDownloading(idx int) {
 		}
 	}
 	e.releaseBoundary(demote)
-	if !already {
+	// With the in-RAM cache the file is not downloaded whole: the stream's
+	// window (streamReadahead) fetches what it is about to read. A whole-file
+	// Normal priority made the capped request walk spend the budget past that
+	// window on the rarest pieces anywhere in the file; the cache evicts those
+	// first (farthest ahead), none was ever played, and each one a peer then
+	// asked for was resynced as incomplete and downloaded again: a 9.95 GB
+	// file cost 12.55 GB and stalled a 4K stream (plugin.video.rivulet#96).
+	if !already && e.mem == nil {
 		files[idx].Download()
 	}
 }
@@ -1408,7 +1416,7 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 	e.warmMoov(idx)          // pre-read the tail so the moov downloads with the front
 	e.prefetchNext(idx)      // opportunistically warm the next episode's header (binge UX)
 	r := f.NewReader()
-	r.SetReadahead(readaheadFor(cachedSpeed))
+	r.SetReadahead(e.streamReadahead(cachedSpeed))
 	now := time.Now()
 	// ctx is the reader's long-lived context: it lives for the reader's
 	// whole lifetime and is cancelled only from pinnedReader.Close (see the
@@ -1621,6 +1629,20 @@ func readaheadFor(speed float64) int64 {
 	return ra
 }
 
+// streamReadahead returns a player stream's readahead window at a measured
+// download speed. On disk it is readaheadFor(speed): a short window that orders
+// the next pieces first, while the whole-file download (ensureDownloading)
+// fetches the rest. The in-RAM cache has no whole-file download, so the window
+// is all that fetches ahead of the reader, and it is sized from the budget
+// instead: half of it, which leaves room for the boundary pieces and the
+// pieces just played (evicted first) without evicting the window itself.
+func (e *engine) streamReadahead(speed float64) int64 {
+	if e.mem != nil {
+		return e.mem.capacity / 2
+	}
+	return readaheadFor(speed)
+}
+
 // pinnedReader wraps a torrent file reader. While it is open the engine's
 // openReaders count is >0 so the janitor never evicts the torrent mid-stream
 // (Close decrements exactly once). It also (a) grows the readahead window as the
@@ -1803,7 +1825,7 @@ func (p *pinnedReader) adjustReadahead() {
 	p.e.mu.Lock()
 	sp := p.e.lastDLSpeed
 	p.e.mu.Unlock()
-	p.tr.SetReadahead(readaheadFor(sp))
+	p.tr.SetReadahead(p.e.streamReadahead(sp))
 }
 
 // prefetchNext opportunistically warms the NEXT video file's header and tail
