@@ -929,3 +929,62 @@ func TestSlotSemRaisedLimitPrefersRegular(t *testing.T) {
 	lowCancel()
 	<-lowDone
 }
+
+// Pins are restored at load, before the resumed job starts.
+func TestLoadPersistedRestoresPins(t *testing.T) {
+	work := t.TempDir()
+	cfg := HLSConfig{Prepare: true, SessionTTL: time.Hour}
+	m := newTestPersistManager(t, work, cfg, nil)
+	dir := seedPersistedSession(t, m, "film", time.Now())
+	if err := writePrepFile(dir, prepAudioDefault); err != nil {
+		t.Fatal(err)
+	}
+	m.CloseHLS()
+	m2 := newTestPersistManager(t, work, cfg, nil)
+	m2.mu.Lock()
+	s := m2.sessions["film"]
+	m2.mu.Unlock()
+	if s == nil || !s.pins.Load().has("seg0.ts") {
+		t.Error("segments not pinned right after load")
+	}
+}
+
+// An unreadable prepare.json is kept on resume (only invalid ones go).
+func TestResumePreparedKeepsUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions not enforced for root")
+	}
+	m := newPrepManager(t)
+	s := injectPrepSession(t, m, "film", 8, nil)
+	path := filepath.Join(s.dir, prepFileName)
+	if err := writePrepFile(s.dir, prepAudioDefault); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	m.resumePrepared()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("unreadable prepare.json removed: %v", err)
+	}
+}
+
+// The consecutive-failure count restarts with the retry pass.
+func TestPrepareConsecutiveResetsPerPass(t *testing.T) {
+	m := newPrepManager(t)
+	var calls atomic.Int32
+	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+		// Pass 1: seg0 ok, seg1 and seg2 fail. Pass 2: seg1 fails again
+		// (3 errors overall, but only 2 in a row per pass), seg2 succeeds.
+		c := calls.Add(1)
+		if c == 2 || c == 3 || c == 4 {
+			return "", errors.New("boom")
+		}
+		return writeFakeSegment(t, s, segName(n, kind, k)), nil
+	}
+	injectPrepSession(t, m, "film", 12, nil) // 3 segments
+	if _, err := m.PrepareHLS("film", ""); err != nil {
+		t.Fatal(err)
+	}
+	waitPrepState(t, m, "film", prepDone)
+}

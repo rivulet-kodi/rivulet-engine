@@ -642,6 +642,7 @@ func (m *hlsManager) loadPersisted() {
 		s.ttl.Store(int64(rec.TTL))
 		s.lastAccess.Store(lastAccess.UnixNano())
 		s.persistedAccess.Store(rec.LastAccess.UnixNano())
+		m.restorePins(s)
 		kept = append(kept, candidate{name, s})
 	}
 
