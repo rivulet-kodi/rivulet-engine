@@ -411,8 +411,8 @@ func (m *hlsManager) prepPasses(ctx context.Context, s *hlsSession, rends []prep
 			todo = append(todo, item{r, i})
 		}
 	}
-	consecutive := 0
 	for pass := 0; pass < 2 && len(todo) > 0; pass++ {
+		consecutive := 0 // in a row within this pass
 		var again, busy []item
 		busyRounds := 0
 		for len(todo) > 0 {
@@ -606,8 +606,13 @@ func writePrepFile(dir, audio string) error {
 	return err
 }
 
+// errPrepInvalid marks a prepare.json whose content is bad (as opposed to
+// one that could not be read).
+var errPrepInvalid = errors.New("invalid prepare file")
+
 // readPrepFile reads dir/prepare.json. ok is false when there is none; an
-// unreadable or invalid one is an error.
+// unreadable or invalid one is an error, wrapping errPrepInvalid for the
+// latter.
 func readPrepFile(dir string) (audio string, ok bool, err error) {
 	f, err := os.Open(filepath.Join(dir, prepFileName))
 	if errors.Is(err, os.ErrNotExist) {
@@ -622,16 +627,16 @@ func readPrepFile(dir string) (audio string, ok bool, err error) {
 		return "", false, err
 	}
 	if len(data) > prepMaxFileSize {
-		return "", false, fmt.Errorf("%s larger than %d bytes", prepFileName, prepMaxFileSize)
+		return "", false, fmt.Errorf("%w: %s larger than %d bytes", errPrepInvalid, prepFileName, prepMaxFileSize)
 	}
 	var rec prepRecord
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&rec); err != nil {
-		return "", false, fmt.Errorf("decode %s: %w", prepFileName, err)
+		return "", false, fmt.Errorf("%w: decode %s: %v", errPrepInvalid, prepFileName, err)
 	}
 	if rec.Audio != prepAudioDefault && rec.Audio != prepAudioAll {
-		return "", false, fmt.Errorf("%s: invalid audio %q", prepFileName, rec.Audio)
+		return "", false, fmt.Errorf("%w: %s: invalid audio %q", errPrepInvalid, prepFileName, rec.Audio)
 	}
 	return rec.Audio, true, nil
 }
@@ -688,8 +693,12 @@ func (m *hlsManager) resumePrepared() {
 	for id, s := range sessions {
 		audio, ok, err := readPrepFile(s.dir)
 		if err != nil {
-			log.Warn("discarding unreadable HLS preparation file", "id", id, "err", err)
-			_ = os.Remove(filepath.Join(s.dir, prepFileName))
+			if errors.Is(err, errPrepInvalid) {
+				log.Warn("discarding invalid HLS preparation file", "id", id, "err", err)
+				_ = os.Remove(filepath.Join(s.dir, prepFileName))
+			} else {
+				log.Warn("cannot read HLS preparation file; keeping it", "id", id, "err", err)
+			}
 			continue
 		}
 		if !ok {
@@ -720,3 +729,19 @@ func (p *prober) StopPrepareHLS(id string) error { return p.hls.StopPrepareHLS(i
 // hlsManager.ResumePrepared). Not part of types.MediaProber; the server
 // calls it after starting its listeners.
 func (p *prober) ResumeHLSPrepare() { p.hls.ResumePrepared() }
+
+// restorePins pins the segments of a restored session's persisted
+// preparation request from load time, so live playback before the job
+// resumes cannot evict the prepared film.
+func (m *hlsManager) restorePins(s *hlsSession) {
+	if !m.cfg.Prepare {
+		return
+	}
+	audio, ok, err := readPrepFile(s.dir)
+	if err != nil || !ok {
+		return
+	}
+	_, multiAudio, streams, _ := s.prepSnapshot()
+	_, pins := prepPlan(multiAudio, streams, audio)
+	s.pins.Store(pins)
+}
