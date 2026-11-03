@@ -67,8 +67,9 @@ type speedSample struct {
 // engine is a single torrent handle satisfying types.Engine.
 type engine struct {
 	t        *torrent.Torrent
-	infoHash string // lower-cased
-	path     string // cache path (reported in Stats.opts.path)
+	infoHash string      // lower-cased
+	path     string      // cache path (reported in Stats.opts.path)
+	mem      *memStorage // in-RAM backend, nil on disk storage; streams report reads to it
 
 	// connectionTries is a best-effort count of outbound dial churn: it sums
 	// increases in HalfOpenPeers between successive Stats() samples. anacrolix
@@ -202,6 +203,10 @@ type manager struct {
 	// DefaultStorage. anacrolix does not Close a user-provided DefaultStorage,
 	// so the manager owns closing it (see Close).
 	storage io.Closer
+
+	// mem is the in-RAM backend when the in-RAM cache is on (storage is then
+	// the same object), else nil. Engines open a memCursor on it per stream.
+	mem *memStorage
 
 	mu        sync.RWMutex
 	engines   map[string]*engine // keyed by lower-cased infoHash
@@ -416,6 +421,7 @@ func New(cfg types.Config) (types.EngineManager, error) {
 		engines:                    make(map[string]*engine),
 		done:                       done,
 		storage:                    storageCloser,
+		mem:                        memStore,
 		purging:                    make(map[string]chan struct{}),
 		establishedConnsPerTorrent: est,
 		maxEngines:                 maxEnginesFromEnv(),
@@ -572,6 +578,7 @@ func (m *manager) EnsureEngine(infoHash string, opts types.AddOptions) (types.En
 			path:       filepath.Join(m.cfg.CacheRoot, ih),
 			lastAccess: time.Now(),
 			optsSource: m.statsOptsSource,
+			mem:        m.mem,
 		}
 		m.engines[ih] = e
 		m.mu.Unlock()
@@ -1409,6 +1416,9 @@ func (e *engine) NewReader(idx int) (io.ReadSeekCloser, int64, error) {
 		deadline: now.Add(startupReadTimeout),
 		ctx:      ctx,
 		cancel:   cancel,
+		cur:      e.mem.openCursor(e.infoHash),
+		base:     f.Offset(),
+		pieceLen: e.t.Info().PieceLength,
 	}
 	// nextRAAdj is an atomic.Int64 (unix-nanos); must be set after construction.
 	pr.nextRAAdj.Store(now.Add(readaheadAdjustInterval).UnixNano())
@@ -1649,6 +1659,15 @@ type pinnedReader struct {
 	deadline  time.Time    // written once at construction; read-only thereafter (no lock needed)
 	nextRAAdj atomic.Int64 // unix-nanos of next readahead recompute; monotonically advancing
 
+	// cur reports the pieces this stream reads to the in-RAM cache, which
+	// evicts by what the player has read (nil on disk storage; see memCursor).
+	// pos is the stream offset within the file, owned by the reading goroutine;
+	// base (the file's torrent offset) and pieceLen map it to piece indices.
+	cur      *memCursor
+	pos      int64
+	base     int64
+	pieceLen int64
+
 	closeErr error // result of the single real tr.Close() call; cached by Close's sync.Once
 }
 
@@ -1658,7 +1677,9 @@ func (p *pinnedReader) Read(b []byte) (int, error) {
 	// below on the first successful read), so reads block for the swarm
 	// instead of racing a deadline. Lock-free.
 	if p.started.Load() {
-		return p.tr.Read(b)
+		n, err := p.tr.Read(b)
+		p.noteRead(n)
+		return n, err
 	}
 	// First byte not yet received: bound this read with the startup deadline
 	// so a dead swarm errors out instead of hanging the player forever. The
@@ -1676,11 +1697,29 @@ func (p *pinnedReader) Read(b []byte) (int, error) {
 		p.tr.SetContext(p.ctx)
 	}
 	cancelDeadline()
+	p.noteRead(n)
 	return n, err
 }
 
+// noteRead advances the stream offset past n bytes just read and reports the
+// pieces they came from to the in-RAM cache.
+func (p *pinnedReader) noteRead(n int) {
+	if n <= 0 {
+		return
+	}
+	start := p.base + p.pos
+	p.pos += int64(n)
+	if p.cur != nil {
+		p.cur.read(int(start/p.pieceLen), int((start+int64(n)-1)/p.pieceLen))
+	}
+}
+
 func (p *pinnedReader) Seek(offset int64, whence int) (int64, error) {
-	return p.tr.Seek(offset, whence)
+	pos, err := p.tr.Seek(offset, whence)
+	if err == nil {
+		p.pos = pos
+	}
+	return pos, err
 }
 
 func (p *pinnedReader) Close() error {
@@ -1698,6 +1737,7 @@ func (p *pinnedReader) Close() error {
 		// vendored reader's own idempotency (map-delete + nil-guarded
 		// storageReader close) to make a concurrent double call harmless.
 		p.closeErr = p.tr.Close()
+		p.cur.close()
 		var demote bool
 		p.e.mu.Lock()
 		p.e.openReaders--

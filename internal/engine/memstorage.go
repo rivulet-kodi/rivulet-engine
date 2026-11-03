@@ -42,7 +42,11 @@ package engine
 //     reader was evicted before the data behind it and a 4K stream stalled on
 //     "piece not resident" re-downloads of the very pieces it was about to read.
 //     Read-ahead pieces a forward seek skipped (below the reader position)
-//     lead that class, as they will not be read.
+//     lead that class, as they will not be read. "Read" means read by a
+//     player stream, which the engine reports through a memCursor, never a
+//     storage ReadAt: anacrolix serves peer uploads through ReadAt as well,
+//     and counting those reads let a peer's request write off the window
+//     just ahead of the player (see memCursor).
 //
 // Concurrency model:
 //
@@ -52,7 +56,8 @@ package engine
 //   - The budget (used) and the eviction order (an LRU min-heap of the complete
 //     pieces) are guarded by one store-wide mutex (memStorage.mu). It is taken
 //     only for the rare accounting events: first write into a piece, completion,
-//     eviction, torrent close. ReadAt and chunk WriteAt never take it.
+//     eviction, torrent close, and a player stream entering a new piece
+//     (memCursor.read). ReadAt and chunk WriteAt never take it.
 //   - Lock order is allocMu -> memStorage.mu -> memPiece.mu. A piece lock is a
 //     leaf with respect to the other two: it is never held while acquiring
 //     either of them.
@@ -60,8 +65,9 @@ package engine
 //     lower bound of it per piece and refreshes a stale key only when the piece
 //     surfaces as the eviction candidate, so a repeat read costs no heap
 //     operation and eviction is O(log n) amortised instead of a scan over every
-//     piece. Only the first read of a piece (moving it from the read-ahead class
-//     to the consumed class) takes memStorage.mu, once per piece.
+//     piece. Moving a piece from the read-ahead class to the consumed class
+//     happens in memCursor.read, under memStorage.mu, once per piece a stream
+//     enters.
 //
 // Correctness — we never serve wrong or stale bytes:
 //
@@ -175,6 +181,10 @@ type memStorage struct {
 	// never visited.
 	lru lruHeap
 
+	// torrents maps each open torrent's lower-case hex infohash to its view,
+	// so the engine can open a memCursor for a player stream (openCursor).
+	torrents map[string]*memTorrent
+
 	// tick is the recency clock: every read and completion takes the next
 	// value. A counter, not wall time, because a coarse clock (Windows) gives
 	// consecutive accesses the same timestamp and makes the victim arbitrary.
@@ -199,6 +209,7 @@ var _ storage.ClientImplCloser = (*memStorage)(nil)
 func newMemStorage(capacity int64) *memStorage {
 	s := &memStorage{
 		capacity:       capacity,
+		torrents:       map[string]*memTorrent{},
 		refetchBackoff: 100 * time.Millisecond,
 	}
 	// One shared Capacity function for all torrents => one global budget. The
@@ -220,8 +231,12 @@ func (s *memStorage) OpenTorrent(
 		store:    s,
 		infoHash: ih,
 		pieces:   make([]atomic.Pointer[memPiece], info.NumPieces()),
+		cursors:  map[*memCursor]struct{}{},
+		readPos:  -1,
 	}
-	mt.readPos = -1
+	s.mu.Lock()
+	s.torrents[ih.HexString()] = mt
+	s.mu.Unlock()
 	return storage.TorrentImpl{
 		Piece:    mt.piece,
 		Close:    mt.close,
@@ -348,16 +363,13 @@ const aheadKeyBase = int64(1) << 62
 
 func aheadKey(index int) int64 { return aheadKeyBase + int64(math.MaxInt32-index) }
 
-// stamp records a read of mp for eviction ordering. A repeat read of a consumed
-// piece is lock-free, and a no-op when mp already holds the newest stamp (a
-// stream reading one piece sequentially therefore never writes the shared
-// clock). The first read of a piece takes s.mu once to move it to the consumed
-// class.
+// stamp records a read of a consumed piece for eviction ordering, lock-free,
+// and is a no-op when mp already holds the newest stamp (a stream reading one
+// piece sequentially therefore never writes the shared clock). A read-ahead
+// piece is left alone: ReadAt also serves peer uploads, and only a player
+// stream's memCursor may consume it.
 func (s *memStorage) stamp(mp *memPiece) {
 	if !mp.consumed.Load() {
-		s.mu.Lock()
-		s.consumeLocked(mp)
-		s.mu.Unlock()
 		return
 	}
 	if mp.lastUsed.Load() != s.tick.Load() {
@@ -365,10 +377,9 @@ func (s *memStorage) stamp(mp *memPiece) {
 	}
 }
 
-// consumeLocked moves mp, on its first read, from the read-ahead class to the
-// consumed class with the newest tick, and records it as the reader position.
-// A racing first read that lost the lock only refreshes the tick. Caller holds
-// s.mu.
+// consumeLocked moves mp from the read-ahead class to the consumed class with
+// the newest tick; an already consumed piece only refreshes its tick. Caller
+// holds s.mu.
 func (s *memStorage) consumeLocked(mp *memPiece) {
 	stamp := s.tick.Add(1)
 	mp.lastUsed.Store(stamp)
@@ -376,7 +387,6 @@ func (s *memStorage) consumeLocked(mp *memPiece) {
 		return
 	}
 	mp.consumed.Store(true)
-	mp.mt.readPos = mp.index
 	if mp.lruIdx >= 0 {
 		mp.key = stamp
 		heap.Fix(&s.lru, mp.lruIdx)
@@ -439,11 +449,110 @@ type memTorrent struct {
 	infoHash metainfo.Hash
 	pieces   []atomic.Pointer[memPiece]
 
-	// readPos is the index of the piece the reader last read for the first
-	// time (-1 before any read). Once only read-ahead pieces are left,
-	// popAheadLocked evicts those below it first: a forward seek skipped them
-	// and they will not be read. Written and read under store.mu.
+	// cursors are the open player streams on this torrent (see memCursor), and
+	// readPos is the lowest piece any of them last read (-1 while none has
+	// read). Once only read-ahead pieces are left, popAheadLocked evicts those
+	// below readPos first: every stream has moved past them (a forward seek
+	// skipped them), so they will not be read. The minimum, not the latest
+	// read, so a second stream on the same torrent (a player's probe of the
+	// file's tail) cannot write off the first stream's window. closed is set
+	// once the torrent is dropped. All guarded by store.mu.
+	cursors map[*memCursor]struct{}
 	readPos int
+	closed  bool
+}
+
+// updateReadPosLocked recomputes readPos from the open cursors. Caller holds
+// store.mu.
+func (mt *memTorrent) updateReadPosLocked() {
+	mt.readPos = -1
+	for c := range mt.cursors {
+		if c.pos >= 0 && (mt.readPos < 0 || c.pos < mt.readPos) {
+			mt.readPos = c.pos
+		}
+	}
+}
+
+// memCursor is one player stream's position in a torrent's in-RAM cache. The
+// engine reports every piece a stream reads through it, and only those reads
+// move a piece from the read-ahead class to the consumed class.
+//
+// Classifying on storage ReadAt instead (as before) cannot tell the player from
+// a peer: anacrolix serves uploads through the same ReadAt, and the engine
+// seeds. A peer's request for a read-ahead piece then marked it consumed, so it
+// was evicted before the player reached it, and moved readPos past the player,
+// so the pieces just ahead of it read as skipped and went first — the
+// "piece not resident" refetch bursts of rivulet-kodi/plugin.video.rivulet#96.
+type memCursor struct {
+	mt *memTorrent
+
+	// pos is the last piece this stream read (-1 before its first read) and
+	// closed is set by close. Both guarded by store.mu.
+	pos    int
+	closed bool
+
+	// seen is the last piece reported, owned by the reading goroutine (a
+	// stream is read by one goroutine at a time), so a run of reads within
+	// one piece takes no lock.
+	seen int
+}
+
+// openCursor registers a player stream on the torrent ih (lower-case hex) and
+// returns its cursor, or nil when s is nil or the torrent is not open on it.
+// The caller must close the cursor when the stream ends.
+func (s *memStorage) openCursor(ih string) *memCursor {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mt := s.torrents[ih]
+	if mt == nil {
+		return nil
+	}
+	c := &memCursor{mt: mt, pos: -1, seen: -1}
+	mt.cursors[c] = struct{}{}
+	return c
+}
+
+// read records that the stream read pieces first..last: each resident complete
+// piece among them moves to the consumed class with the newest tick, and the
+// stream's position becomes last. A nil cursor is a no-op.
+func (c *memCursor) read(first, last int) {
+	if c == nil || (first == c.seen && last == c.seen) {
+		return
+	}
+	c.seen = last
+	s := c.mt.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c.closed || c.mt.closed {
+		return
+	}
+	for i := max(first, 0); i <= last && i < len(c.mt.pieces); i++ {
+		if mp := c.mt.pieces[i].Load(); mp != nil && mp.lruIdx >= 0 {
+			s.consumeLocked(mp)
+		}
+	}
+	c.pos = last
+	c.mt.updateReadPosLocked()
+}
+
+// close unregisters the stream; its position no longer holds back readPos.
+// Idempotent; a nil cursor is a no-op.
+func (c *memCursor) close() {
+	if c == nil {
+		return
+	}
+	s := c.mt.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	delete(c.mt.cursors, c)
+	c.mt.updateReadPosLocked()
 }
 
 // piece returns the (lazily created) memPiece for p. anacrolix calls it for
@@ -467,6 +576,10 @@ func (mt *memTorrent) close() error {
 	s := mt.store
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	mt.closed = true
+	if key := mt.infoHash.HexString(); s.torrents[key] == mt {
+		delete(s.torrents, key)
+	}
 	for i := range mt.pieces {
 		if mp := mt.pieces[i].Load(); mp != nil {
 			s.dropLocked(mp)
@@ -495,13 +608,14 @@ type memPiece struct {
 	// chunk writers reserve the budget (and allocate the buffer) only once.
 	allocMu sync.Mutex
 
-	// lastUsed records the store tick of the most recent successful
-	// ReadAt on this piece (its completion tick until then), updated
+	// lastUsed records the store tick of the most recent read of this piece
+	// since it was consumed (its completion tick until then), updated
 	// atomically without holding any lock. popOldestLocked uses it to pick the
 	// least-recently-read consumed piece.
 	lastUsed atomic.Int64
 
-	// consumed is true once the reader has read this piece; until then a
+	// consumed is true once a player stream has read this piece (reported by
+	// its memCursor, not by ReadAt, which peer uploads share); until then a
 	// complete piece is read-ahead and evicted last. Set under store.mu,
 	// cleared when the buffer is freed or the piece re-completes; loaded
 	// lock-free by stamp.

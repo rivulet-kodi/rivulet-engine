@@ -136,6 +136,7 @@ func TestMemStorageEvictsPlayedBeforeReadAhead(t *testing.T) {
 	s := newMemStorage(capacity)
 	t.Cleanup(func() { _ = s.Close() })
 	ti, info := openMemTorrent(t, s, 0, pieceLen, numPieces)
+	cur := openTestCursor(t, s, 0)
 
 	pieces := make([]storage.PieceImpl, numPieces)
 	writeComplete := func(idx int) {
@@ -155,6 +156,7 @@ func TestMemStorageEvictsPlayedBeforeReadAhead(t *testing.T) {
 		if err != nil || !bytes.Equal(got, fillPattern(idx, pieceLen)) {
 			t.Fatalf("read p%d: err=%v or wrong bytes", idx, err)
 		}
+		cur.read(idx, idx)
 	}
 	resident := func(want ...int) {
 		t.Helper()
@@ -198,6 +200,86 @@ func TestMemStorageEvictsPlayedBeforeReadAhead(t *testing.T) {
 	resident(2, 3, 7)
 	writeComplete(0)
 	resident(0, 3, 7)
+}
+
+// TestMemStorageOnlyPlayerReadsShapeEviction is the regression for the
+// follow-up on rivulet-kodi/plugin.video.rivulet#96: a peer upload reads a
+// read-ahead piece through the same storage ReadAt as the player, and a second
+// stream (a player's probe of the file's tail) reads far ahead of the first.
+// Neither may make the store evict the pieces just ahead of the player, which
+// it then hit as "piece not resident" refetches.
+func TestMemStorageOnlyPlayerReadsShapeEviction(t *testing.T) {
+	const (
+		pieceLen  = 64
+		numPieces = 16
+	)
+	s := newMemStorage(6 * pieceLen) // room for exactly six resident pieces
+	t.Cleanup(func() { _ = s.Close() })
+	ti, info := openMemTorrent(t, s, 2, pieceLen, numPieces)
+	player := openTestCursor(t, s, 2)
+
+	writeComplete := func(idx int) {
+		t.Helper()
+		p := ti.Piece(info.Piece(idx))
+		if _, err := p.WriteAt(fillPattern(idx, pieceLen), 0); err != nil {
+			t.Fatalf("piece %d WriteAt: %v", idx, err)
+		}
+		if err := p.MarkComplete(); err != nil {
+			t.Fatalf("piece %d MarkComplete: %v", idx, err)
+		}
+	}
+	readAt := func(idx int) {
+		t.Helper()
+		if n, err := ti.Piece(info.Piece(idx)).ReadAt(make([]byte, 8), 0); n != 8 || err != nil {
+			t.Fatalf("ReadAt(p%d) = (%d, %v)", idx, n, err)
+		}
+	}
+	resident := func(want ...int) {
+		t.Helper()
+		var got []int
+		for idx := range numPieces {
+			if ti.Piece(info.Piece(idx)).Completion().Complete {
+				got = append(got, idx)
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("resident = %v, want %v", got, want)
+		}
+	}
+
+	for idx := range 6 {
+		writeComplete(idx)
+	}
+	readAt(0)
+	player.read(0, 0)
+	readAt(5) // a peer's upload request for a read-ahead piece
+
+	writeComplete(6)
+	resident(1, 2, 3, 4, 5, 6) // the played p0 goes
+	// Only read-ahead left: the farthest ahead goes, not the uploaded p5 nor
+	// the p1 the player reads next.
+	writeComplete(7)
+	resident(1, 2, 3, 4, 5, 7)
+
+	// A probe stream reads p7, far ahead of the player. It consumed p7, so p7
+	// goes first; then the player's window must still not read as skipped.
+	probe := openTestCursor(t, s, 2)
+	readAt(7)
+	probe.read(7, 7)
+	writeComplete(8)
+	resident(1, 2, 3, 4, 5, 8)
+	writeComplete(9)
+	resident(1, 2, 3, 4, 5, 9)
+
+	// The player seeks forward to p4: with the probe closed, p1..p3 are now
+	// behind every stream and go before anything ahead of it.
+	probe.close()
+	readAt(4)
+	player.read(4, 4)
+	writeComplete(10)
+	resident(1, 2, 3, 5, 9, 10) // the played p4 goes first
+	writeComplete(11)
+	resident(2, 3, 5, 9, 10, 11) // then the skipped pieces, lowest first
 }
 
 // TestMemStorageConcurrentNeverWrongBytes hammers the backend from many
@@ -719,6 +801,18 @@ func openMemTorrent(t *testing.T, s *memStorage, id byte, pieceLen int64, numPie
 	return ti, info
 }
 
+// openTestCursor opens a player-stream cursor on the torrent openMemTorrent
+// opened with id; it is closed on cleanup.
+func openTestCursor(t *testing.T, s *memStorage, id byte) *memCursor {
+	t.Helper()
+	c := s.openCursor(metainfo.Hash{id}.HexString())
+	if c == nil {
+		t.Fatalf("openCursor(%d): torrent not registered", id)
+	}
+	t.Cleanup(c.close)
+	return c
+}
+
 // TestMemStorageEvictionMatchesModel drives a random mix of completions and
 // reads and checks, after every step, that the resident set equals a reference
 // model of the eviction policy: consumed (read) pieces go first, least recently
@@ -736,6 +830,7 @@ func TestMemStorageEvictionMatchesModel(t *testing.T) {
 	s := newMemStorage(resident * pieceLen)
 	t.Cleanup(func() { _ = s.Close() })
 	ti, info := openMemTorrent(t, s, 1, pieceLen, numPieces)
+	cur := openTestCursor(t, s, 1)
 	pieces := make([]storage.PieceImpl, numPieces)
 	for i := range pieces {
 		pieces[i] = ti.Piece(info.Piece(i))
@@ -744,7 +839,7 @@ func TestMemStorageEvictionMatchesModel(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 7))
 	var consumed []int      // read pieces, least recently read first
 	ahead := map[int]bool{} // complete, not yet read
-	readPos := -1           // index of the last first-read piece
+	readPos := -1           // index of the stream's last read piece
 	isResident := func(idx int) bool { return ahead[idx] || slices.Contains(consumed, idx) }
 	evict := func() {
 		if len(consumed) > 0 {
@@ -774,9 +869,10 @@ func TestMemStorageEvictionMatchesModel(t *testing.T) {
 			if n, err := pieces[idx].ReadAt(buf, 0); n != len(buf) || err != nil {
 				t.Fatalf("step %d: ReadAt(%d) = (%d, %v)", step, idx, n, err)
 			}
+			cur.read(idx, idx)
+			readPos = idx
 			if ahead[idx] {
 				delete(ahead, idx)
-				readPos = idx
 			} else {
 				consumed = slices.DeleteFunc(consumed, func(v int) bool { return v == idx })
 			}
@@ -1015,6 +1111,7 @@ func TestMemStorageWriteTo(t *testing.T) {
 	if _, err := readFull(p0, pieceLen); err != nil {
 		t.Fatal(err)
 	}
+	openTestCursor(t, s, 1).read(0, 0)
 	for _, idx := range []int{1, 2} {
 		p := ti.Piece(info.Piece(idx))
 		if _, err := p.WriteAt(make([]byte, pieceLen), 0); err != nil {
