@@ -95,113 +95,97 @@ func isSelfOrigin(raw, selfBase string) bool {
 	return l == selfBase || strings.HasPrefix(l, selfBase+"/")
 }
 
-// selfPathKind is how a URL on this server's own origin may be used as a
-// media or subtitle URL; see classifySelfPath.
-type selfPathKind int
-
-const (
-	// selfPathRefused: not a media URL. Control routes (/removeAll,
-	// /{infoHash}/remove, /casting, …) and anything not listed below.
-	selfPathRefused selfPathKind = iota
-	// selfPathLocal: serves local content (or redirects to a route that
-	// does); ffmpeg reads it directly.
-	selfPathLocal
-	// selfPathRelayed: passes a remote HTTP body through (/proxy, /ftp,
-	// /yt); ffmpeg reads it through the media relay, so nested playlist
-	// entries and redirects are re-checked like any remote URL.
-	selfPathRelayed
-)
-
-// classifySelfPath classifies escaped, the escaped path of a URL on this
-// server's own origin, mirroring internal/api's router (issue #65):
+// isSelfMediaPath reports whether escaped, the escaped path of a URL on this
+// server's own origin, is a media route, mirroring internal/api's router
+// (issue #65). Every such route is read through the media relay (relayInput),
+// whether it serves local content (issue #69) or passes a remote body
+// through, so a playlist behind it has its entries re-checked either way:
 //
-//   - local: a torrent file (/{infoHash}/{fileIdx}[/…] and its
+//   - local content: a torrent file (/{infoHash}/{fileIdx}[/…] and its
 //     /stream/{infoHash}/{fileIdx} alias); an archive or NZB session
 //     (/{zip,rar,7zip,tar,tgz,nzb}/create[/{key}], which stremio-core sends
 //     as the playable URL and which redirects to /{ext}/stream/…, and
 //     /{ext}/stream[/…]); a local-addon file (/local-addon/file/{id}).
-//   - relayed: /proxy/… (stremio-core's proxyHeaders form
+//   - pass-through: /proxy/… (stremio-core's proxyHeaders form
 //     /proxy/d=…&h=…/{path}, and /proxy/{stream,hls,…}), /ftp/{file} and
 //     /yt/{id}.
-//   - refused: everything else, including /extractor, /base64, /hlsv2 and
-//     every control route.
+//
+// Everything else is refused, including /extractor, /base64, /hlsv2 and every
+// control route.
 //
 // Segments are unescaped one at a time. A "." or ".." segment is refused so
 // a path cannot be normalized onto another route on the way. Outside /proxy
 // (whose handler splits the escaped path itself) an empty segment or an
 // encoded "/" is refused too, so the router, which splits the decoded path,
 // sees the same segments.
-func classifySelfPath(escaped string) selfPathKind {
+func isSelfMediaPath(escaped string) bool {
 	raw := strings.Split(strings.TrimPrefix(escaped, "/"), "/")
 	seg := make([]string, len(raw))
 	for i, r := range raw {
 		d, err := url.PathUnescape(r)
 		if err != nil || d == "." || d == ".." {
-			return selfPathRefused
+			return false
 		}
 		seg[i] = d
 	}
 	if seg[0] == "proxy" {
-		if len(seg) < 2 || seg[1] == "" {
-			return selfPathRefused
-		}
-		return selfPathRelayed
+		return len(seg) >= 2 && seg[1] != ""
 	}
 	for _, s := range seg {
 		if s == "" || strings.Contains(s, "/") {
-			return selfPathRefused
+			return false
 		}
 	}
 	switch {
 	case isInfoHashSeg(seg[0]):
 		if len(seg) < 2 {
-			return selfPathRefused
+			return false
 		}
 		switch seg[1] {
 		case "create", "remove", "stats.json", "peers":
-			return selfPathRefused
+			return false
 		}
 		if len(seg) == 2 || seg[2] != "stats.json" {
-			return selfPathLocal
+			return true
 		}
 	case seg[0] == "stream":
 		if len(seg) >= 3 && isInfoHashSeg(seg[1]) {
-			return selfPathLocal
+			return true
 		}
 	case seg[0] == "zip", seg[0] == "rar", seg[0] == "7zip", seg[0] == "tar", seg[0] == "tgz", seg[0] == "nzb":
 		if len(seg) >= 2 && (seg[1] == "stream" || (seg[1] == "create" && len(seg) <= 3)) {
-			return selfPathLocal
+			return true
 		}
 	case seg[0] == "local-addon":
 		if len(seg) == 3 && seg[1] == "file" {
-			return selfPathLocal
+			return true
 		}
 	case seg[0] == "ftp":
 		if len(seg) == 2 && seg[1] != "create" && seg[1] != "stream" {
-			return selfPathRelayed
+			return true
 		}
 	case seg[0] == "yt":
 		if len(seg) == 2 {
-			return selfPathRelayed
+			return true
 		}
 	}
-	return selfPathRefused
+	return false
 }
 
-// selfURLKind is classifySelfPath for raw, a URL already known to be on this
-// server's own origin.
-func selfURLKind(raw string) selfPathKind {
+// isSelfMediaURL is isSelfMediaPath for raw, a URL already known to be on
+// this server's own origin.
+func isSelfMediaURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return selfPathRefused
+		return false
 	}
-	return classifySelfPath(u.EscapedPath())
+	return isSelfMediaPath(u.EscapedPath())
 }
 
 // validateSelfURL refuses raw, a URL on this server's own origin, unless it
-// may be used as a media URL (local or relayed; see classifySelfPath).
+// may be used as a media URL (see isSelfMediaPath).
 func validateSelfURL(raw string) error {
-	if selfURLKind(raw) == selfPathRefused {
+	if !isSelfMediaURL(raw) {
 		path := raw
 		if u, err := url.Parse(raw); err == nil {
 			path = u.EscapedPath()
@@ -632,7 +616,7 @@ func computeOpenSubHash(size int64, head, tail []byte) uint64 {
 // allowed — every other loopback or private target is still rejected — and
 // localize() is applied first so the self-signed https://…:12470 form maps
 // onto the same origin. On that origin only media routes are accepted (see
-// classifySelfPath). Pass "" to disallow
+// isSelfMediaPath). Pass "" to disallow
 // self-references entirely.
 func validateRemoteURL(raw, selfBase string) error {
 	return validateMediaURL(raw, selfBase, nil)

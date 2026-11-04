@@ -37,7 +37,12 @@ re-checked at dial time to defeat DNS rebinding) governs the actual fetch.
 The same dial-time guard, including redirects, covers archive/NZB downloads
 (`RIVULET_ARCHIVE_ALLOW_PRIVATE`) and FTP (`RIVULET_FTP_ALLOW_PRIVATE`). The
 relay recognises HLS playlists by content as well as by type, and refuses
-DASH manifests (`415`), whose nested URLs it does not rewrite.
+DASH manifests (`415`), whose nested URLs it does not rewrite. A `mediaURL`
+on the server's own origin is accepted only for media routes (torrent, archive
+and local-addon files, `/proxy`, `/ftp`, `/yt`) and goes through the same relay,
+local files included: a local file that is itself an HLS playlist has its
+entries re-checked, so one naming a control route (`/removeAll`) or a
+private host is refused rather than fetched by ffmpeg.
 
 For `/proxy` and `/extractor`, private destinations are blocked unless
 `RIVULET_PROXY_ALLOW_PRIVATE=1` and no proxy password or IP ACL is set. To let

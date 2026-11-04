@@ -714,9 +714,16 @@ func TestProbeAppliesLocalize(t *testing.T) {
 		t.Fatalf("stub ffprobe was never invoked: %v", err)
 	}
 	argv := string(got)
-	want := localize(raw)
-	if !strings.Contains(argv, want) {
-		t.Errorf("ffprobe argv = %q, want it to contain the localized URL %q", argv, want)
+	// A self URL reaches ffprobe as a relay token (issue #69); the URL the
+	// token fetches is the localized one.
+	i := strings.Index(argv, "/r/")
+	if i < 0 {
+		t.Fatalf("ffprobe argv = %q, want a relay token URL", argv)
+	}
+	upstream, self, ok := globalRelay.resolveEntry(strings.TrimSpace(argv[i+len("/r/"):]))
+	if !ok || upstream != localize(raw) || self != p.baseURLLocal {
+		t.Errorf("relay token resolves to (%q, self %q, ok %v), want the localized URL %q on %q",
+			upstream, self, ok, localize(raw), p.baseURLLocal)
 	}
 	if strings.Contains(argv, "12470") {
 		t.Errorf("ffprobe argv = %q, still contains the raw un-localized :12470 URL", argv)
