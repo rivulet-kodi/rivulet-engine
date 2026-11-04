@@ -135,6 +135,11 @@ type mediaRelay struct {
 	// segment is checked against it. Cloud-metadata is never allowed.
 	privateAllow atomic.Pointer[netguard.Allow]
 
+	// cache holds the byte ranges ffmpeg reads again and again from a
+	// source (RIVULET_HLS_RELAY_CACHE_BYTES, HLSConfig.RelayCacheBytes);
+	// disabled by default. See relayCache.
+	cache relayCache
+
 	startOnce sync.Once
 	startErr  error
 	ln        net.Listener
@@ -317,6 +322,7 @@ func (r *mediaRelay) registerAs(rawURL, self string) (string, error) {
 	token = randomRelayToken()
 	r.tokens[token] = r.order.PushBack(&relayEntry{token: token, url: rawURL, expiresAt: exp, self: self})
 	r.byURL[key] = token
+	r.cache.addToken(token) // lock order: r.mu, then r.cache.mu
 	return fmt.Sprintf("http://127.0.0.1:%d/r/%s", r.port(), token), nil
 }
 
@@ -344,6 +350,7 @@ func (r *mediaRelay) sweepLocked(now time.Time) {
 func (r *mediaRelay) deleteElemLocked(el *list.Element) {
 	e := r.order.Remove(el).(*relayEntry)
 	delete(r.tokens, e.token)
+	r.cache.dropToken(e.token) // lock order: r.mu, then r.cache.mu
 	if key := relayEntryKey(e.url, e.self); r.byURL[key] == e.token {
 		delete(r.byURL, key)
 	}
@@ -413,6 +420,18 @@ func (r *mediaRelay) recordFailure(req *http.Request, token, reason string, time
 	r.storeFailure(token, reason, timeout)
 }
 
+// recordStatusFailure records resp's status as an upstream failure for token
+// if it is one, and reports whether it was. 416 is a healthy answer to a
+// read past the end (ffmpeg probing the tail), not a source failure.
+func (r *mediaRelay) recordStatusFailure(req *http.Request, token string, resp *http.Response) bool {
+	if resp.StatusCode < 400 || resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		return false
+	}
+	r.recordFailure(req, token, "upstream returned "+resp.Status,
+		resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode == http.StatusRequestTimeout)
+	return true
+}
+
 // storeFailure records an upstream failure for token unconditionally.
 func (r *mediaRelay) storeFailure(token, reason string, timeout bool) {
 	r.mu.Lock()
@@ -463,29 +482,26 @@ func isTimeout(err error) bool {
 // followed here: its Location is registered like a nested playlist entry
 // and handed back to ffmpeg as a redirect to that token.
 func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upstream, self string) {
-	ctx, client := req.Context(), r.client
-	if self != "" {
-		ctx, client = context.WithValue(ctx, relaySelfAddrKey{}, selfHostPort(self)), r.selfClient
+	// A single-range GET may be answered from, or recorded into, the cache.
+	cacheStart, cacheEnd, cacheable, record := int64(0), int64(0), false, false
+	if req.Method == http.MethodGet && r.cache.enabled() {
+		cacheStart, cacheEnd, cacheable = parseByteRange(req.Header.Get("Range"))
 	}
-	outReq, err := http.NewRequestWithContext(ctx, req.Method, upstream, nil)
+	if cacheable {
+		hit, meta, seen := r.cache.lookup(token, cacheStart)
+		if hit != nil && r.serveCached(w, req, token, upstream, self, cacheStart, cacheEnd, hit, meta) {
+			return
+		}
+		record = seen || hit != nil
+	}
+	outReq, client, err := r.upstreamRequest(req.Context(), req.Method, upstream, self, req.Header.Get("Range"))
 	if err != nil {
 		http.Error(w, "bad upstream url", http.StatusBadGateway)
 		return
 	}
-	if rng := req.Header.Get("Range"); rng != "" {
-		outReq.Header.Set("Range", rng)
-	}
-	// The body must reach the sniffing below exactly as ffmpeg will read
-	// it, and ffmpeg inflates a gzip/deflate body before it probes. Ask for
-	// it uncompressed (this also stops net/http's own transparent gzip).
-	outReq.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(outReq)
 	if err != nil {
-		if isTimeout(err) {
-			r.recordFailure(req, token, "upstream timed out", true)
-		} else {
-			r.recordFailure(req, token, "upstream fetch failed", false)
-		}
+		r.recordFetchError(req, token, err)
 		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		return
 	}
@@ -504,12 +520,7 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 		http.Redirect(w, req, next, http.StatusTemporaryRedirect)
 		return
 	}
-	// 416 is a healthy answer to a read past the end (ffmpeg probing the
-	// tail), not a source failure.
-	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
-		r.recordFailure(req, token, "upstream returned "+resp.Status,
-			resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode == http.StatusRequestTimeout)
-	}
+	r.recordStatusFailure(req, token, resp)
 
 	if req.Method == http.MethodGet {
 		if resp.StatusCode/100 == 2 && ffmpegInflates(resp.Header.Values("Content-Encoding")) {
@@ -595,25 +606,56 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 		}
 	}
 
+	var rec *relayRecorder
+	if cacheable {
+		// Every plain partial response is checked against what the cache
+		// holds for the source; only one from a repeated offset is recorded.
+		if meta, ok := relayCacheMetaOf(resp, cacheStart, cacheEnd); ok && r.cache.observe(token, meta) && record {
+			rec = r.cache.newRecorder(token, meta, cacheStart, rangeLast(meta.total, cacheEnd)-cacheStart+1, nil)
+		}
+	}
 	copyProxyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if req.Method != http.MethodHead {
-		rd := &errTrackingReader{r: resp.Body}
-		_, _ = io.Copy(w, rd)
-		if rd.err != nil && !errors.Is(rd.err, io.EOF) {
-			// Not recordFailure: ffmpeg often drops its request as soon
-			// as the body breaks, so its context is no reliable sign that
-			// the break was ours; only a cancelled upstream read is.
-			if !errors.Is(rd.err, context.Canceled) {
-				r.storeFailure(token, "upstream body ended early", isTimeout(rd.err))
-			}
-			// The upstream body broke mid-stream (reset, timeout, short
-			// read vs Content-Length). Abort the downstream connection so
-			// ffmpeg sees a failed transfer rather than a cleanly
-			// terminated (chunked) but truncated one.
-			panic(http.ErrAbortHandler)
-		}
+		r.copyUpstreamBody(w, req, token, resp.Body, rec)
 	}
+}
+
+// upstreamRequest builds the relay's request for upstream with the Range
+// header rng ("" for none) and picks its client: selfClient, dialing only
+// self's host:port, for a self entry; the guarded client otherwise.
+func (r *mediaRelay) upstreamRequest(ctx context.Context, method, upstream, self, rng string) (*http.Request, *http.Client, error) {
+	client := r.client
+	if self != "" {
+		ctx, client = context.WithValue(ctx, relaySelfAddrKey{}, selfHostPort(self)), r.selfClient
+	}
+	outReq, err := http.NewRequestWithContext(ctx, method, upstream, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if rng != "" {
+		outReq.Header.Set("Range", rng)
+	}
+	// The body must reach the sniffing below exactly as ffmpeg will read
+	// it, and ffmpeg inflates a gzip/deflate body before it probes. Ask for
+	// it uncompressed (this also stops net/http's own transparent gzip).
+	outReq.Header.Set("Accept-Encoding", "identity")
+	return outReq, client, nil
+}
+
+// recordFetchError records a failed upstream request for token.
+func (r *mediaRelay) recordFetchError(req *http.Request, token string, err error) {
+	if isTimeout(err) {
+		r.recordFailure(req, token, "upstream timed out", true)
+	} else {
+		r.recordFailure(req, token, "upstream fetch failed", false)
+	}
+}
+
+// setCacheBytes sets the relay cache budget (HLSConfig.RelayCacheBytes;
+// media.New applies it to globalRelay). 0 disables the cache.
+func (r *mediaRelay) setCacheBytes(n int64) {
+	r.cache.setBytes(n)
 }
 
 // ffmpegInflates reports whether ffmpeg's http protocol would inflate a
