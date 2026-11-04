@@ -711,6 +711,15 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		logging.For("config").Warn("negative RIVULET_TRANSCODE_MAX_HEIGHT", "value", maxHeight, "default", d.MaxHeight)
 		maxHeight = d.MaxHeight
 	}
+	transcodeAhead := envInt(lookup, "RIVULET_HLS_TRANSCODE_AHEAD", d.TranscodeAhead)
+	switch {
+	case transcodeAhead < 0:
+		logging.For("config").Warn("negative RIVULET_HLS_TRANSCODE_AHEAD", "value", transcodeAhead, "default", d.TranscodeAhead)
+		transcodeAhead = d.TranscodeAhead
+	case transcodeAhead > media.MaxTranscodeAhead:
+		logging.For("config").Warn("RIVULET_HLS_TRANSCODE_AHEAD above the maximum; capped", "value", transcodeAhead, "max", media.MaxTranscodeAhead)
+		transcodeAhead = media.MaxTranscodeAhead
+	}
 	return media.HLSConfig{
 		SessionTTL:     sessionTTL,
 		ReaperInterval: envDuration(lookup, "RIVULET_HLS_REAPER_INTERVAL", media.DefaultReaperInterval(sessionTTL)),
@@ -723,6 +732,10 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		// Engine-side preparation (POST /hlsv2/{id}/prepare); off by default.
 		Prepare:            envBool(lookup, "RIVULET_HLS_PREPARE", d.Prepare),
 		PrepareConcurrency: envInt(lookup, "RIVULET_HLS_PREPARE_CONCURRENCY", d.PrepareConcurrency),
+
+		// Transcode-ahead (ahead.go); off by default.
+		TranscodeAhead:   transcodeAhead,
+		AheadConcurrency: envInt(lookup, "RIVULET_HLS_TRANSCODE_AHEAD_CONCURRENCY", d.AheadConcurrency),
 
 		DisableIdleEviction: sessionTTL == 0,
 

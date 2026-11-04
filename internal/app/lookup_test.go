@@ -174,35 +174,37 @@ func TestHLSConfigReaperIntervalExplicitOverride(t *testing.T) {
 
 func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 	env := map[string]string{
-		"RIVULET_HLS_SESSION_TTL":          "45s",
-		"RIVULET_HLS_NEG_PROBE_TTL":        "2m",
-		"RIVULET_HLS_POS_PROBE_TTL":        "3m",
-		"RIVULET_HLS_MAX_SESSIONS":         "10",
-		"RIVULET_HLS_WORK_DIR":             "/data/hls",
-		"RIVULET_HLS_SESSION_OVERRIDES":    "1",
-		"RIVULET_HLS_PERSIST":              "1",
-		"RIVULET_HLS_PREPARE":              "1",
-		"RIVULET_HLS_PREPARE_CONCURRENCY":  "2",
-		"RIVULET_TRANSCODE_VIDEO_BITRATE":  "4M",
-		"RIVULET_TRANSCODE_MAXRATE":        "5M",
-		"RIVULET_TRANSCODE_BUFSIZE":        "10M",
-		"RIVULET_TRANSCODE_MAX_WIDTH":      "1280",
-		"RIVULET_TRANSCODE_MAX_HEIGHT":     "720",
-		"RIVULET_TRANSCODE_VAAPI_QP":       "18",
-		"RIVULET_TRANSCODE_NVENC_PRESET":   "p1",
-		"RIVULET_TRANSCODE_QSV_PRESET":     "medium",
-		"RIVULET_TRANSCODE_X264_PRESET":    "fast",
-		"RIVULET_TRANSCODE_X264_CRF":       "20",
-		"RIVULET_TRANSCODE_TONEMAP":        "mobius",
-		"RIVULET_TRANSCODE_AUDIO_CHANNELS": "6",
-		"RIVULET_TRANSCODE_AUDIO_BITRATE":  "256k",
-		"RIVULET_TRANSCODE_CONCURRENCY":    "2",
-		"RIVULET_HLS_VAAPI_DEVICE":         "/dev/dri/renderD129",
-		"RIVULET_HLS_SEGMENT_TIMEOUT":      "60s",
-		"RIVULET_HLS_SUBTITLE_TIMEOUT":     "45s",
-		"RIVULET_HLS_PROBE_TIMEOUT":        "15s",
-		"RIVULET_HLS_SEEK_PREROLL":         "3",
-		"RIVULET_HLS_SEGMENT_CACHE_BYTES":  "536870912",
+		"RIVULET_HLS_SESSION_TTL":                 "45s",
+		"RIVULET_HLS_NEG_PROBE_TTL":               "2m",
+		"RIVULET_HLS_POS_PROBE_TTL":               "3m",
+		"RIVULET_HLS_MAX_SESSIONS":                "10",
+		"RIVULET_HLS_WORK_DIR":                    "/data/hls",
+		"RIVULET_HLS_SESSION_OVERRIDES":           "1",
+		"RIVULET_HLS_PERSIST":                     "1",
+		"RIVULET_HLS_PREPARE":                     "1",
+		"RIVULET_HLS_PREPARE_CONCURRENCY":         "2",
+		"RIVULET_HLS_TRANSCODE_AHEAD":             "4",
+		"RIVULET_HLS_TRANSCODE_AHEAD_CONCURRENCY": "3",
+		"RIVULET_TRANSCODE_VIDEO_BITRATE":         "4M",
+		"RIVULET_TRANSCODE_MAXRATE":               "5M",
+		"RIVULET_TRANSCODE_BUFSIZE":               "10M",
+		"RIVULET_TRANSCODE_MAX_WIDTH":             "1280",
+		"RIVULET_TRANSCODE_MAX_HEIGHT":            "720",
+		"RIVULET_TRANSCODE_VAAPI_QP":              "18",
+		"RIVULET_TRANSCODE_NVENC_PRESET":          "p1",
+		"RIVULET_TRANSCODE_QSV_PRESET":            "medium",
+		"RIVULET_TRANSCODE_X264_PRESET":           "fast",
+		"RIVULET_TRANSCODE_X264_CRF":              "20",
+		"RIVULET_TRANSCODE_TONEMAP":               "mobius",
+		"RIVULET_TRANSCODE_AUDIO_CHANNELS":        "6",
+		"RIVULET_TRANSCODE_AUDIO_BITRATE":         "256k",
+		"RIVULET_TRANSCODE_CONCURRENCY":           "2",
+		"RIVULET_HLS_VAAPI_DEVICE":                "/dev/dri/renderD129",
+		"RIVULET_HLS_SEGMENT_TIMEOUT":             "60s",
+		"RIVULET_HLS_SUBTITLE_TIMEOUT":            "45s",
+		"RIVULET_HLS_PROBE_TIMEOUT":               "15s",
+		"RIVULET_HLS_SEEK_PREROLL":                "3",
+		"RIVULET_HLS_SEGMENT_CACHE_BYTES":         "536870912",
 	}
 	got := hlsConfig(MapLookup(env))
 	want := media.HLSConfig{
@@ -216,6 +218,8 @@ func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 		Persist:            true,
 		Prepare:            true,
 		PrepareConcurrency: 2,
+		TranscodeAhead:     4,
+		AheadConcurrency:   3,
 		VideoBitrate:       "4M",
 		VideoMaxrate:       "5M",
 		VideoBufsize:       "10M",
@@ -340,5 +344,17 @@ func TestHLSConfigSeekPreroll(t *testing.T) {
 				t.Errorf("SeekPreroll = %s, want %s", got, c.want)
 			}
 		})
+	}
+}
+
+func TestHLSConfigTranscodeAheadBounds(t *testing.T) {
+	for _, c := range []struct {
+		env  string
+		want int
+	}{{"-1", 0}, {"0", 0}, {"6", 6}, {"99", media.MaxTranscodeAhead}} {
+		got := hlsConfig(MapLookup(map[string]string{"RIVULET_HLS_TRANSCODE_AHEAD": c.env}))
+		if got.TranscodeAhead != c.want {
+			t.Errorf("RIVULET_HLS_TRANSCODE_AHEAD=%s: TranscodeAhead = %d, want %d", c.env, got.TranscodeAhead, c.want)
+		}
 	}
 }

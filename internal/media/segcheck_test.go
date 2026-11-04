@@ -637,7 +637,7 @@ func TestTranscodeSegmentNotCachedAfterShutdown(t *testing.T) {
 	s := injectSession(t, m, "shut")
 	s.mediaURL = m.selfBase + testSelfPath
 
-	p, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0, false)
+	p, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0, segLive)
 	if err != nil {
 		t.Fatalf("transcode before shutdown: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestTranscodeSegmentNotCachedAfterShutdown(t *testing.T) {
 	}
 
 	m.BeginShutdown()
-	p, err = m.transcodeSegment(context.Background(), s, 1, segMuxed, 0, false)
+	p, err = m.transcodeSegment(context.Background(), s, 1, segMuxed, 0, segLive)
 	if err != nil {
 		t.Fatalf("transcode during shutdown: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestTranscodeSegmentShutdownRefusesFallback(t *testing.T) {
 
 	t.Run("control: a failed hardware attempt falls back to libx264", func(t *testing.T) {
 		m, s := newSession(t)
-		if _, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0, false); err != nil {
+		if _, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0, segLive); err != nil {
 			t.Fatalf("transcode: %v", err)
 		}
 		if !strings.Contains(callLog(t), "libx264") {
@@ -724,7 +724,7 @@ func TestTranscodeSegmentShutdownRefusesFallback(t *testing.T) {
 	t.Run("after BeginShutdown: no libx264 re-encode, error returned, nothing cached", func(t *testing.T) {
 		m, s := newSession(t)
 		m.BeginShutdown()
-		if _, err := m.transcodeSegment(context.Background(), s, 1, segMuxed, 0, false); err == nil {
+		if _, err := m.transcodeSegment(context.Background(), s, 1, segMuxed, 0, segLive); err == nil {
 			t.Fatal("transcode succeeded after a failed hardware attempt during shutdown")
 		}
 		if strings.Contains(callLog(t), "libx264") {
@@ -778,7 +778,7 @@ func TestTranscodeSegmentShutdownRefusesRetry(t *testing.T) {
 
 	t.Run("control: without shutdown the retry runs", func(t *testing.T) {
 		m, s := newSession(t, "retry-control")
-		if _, err := m.transcodeSegment(context.Background(), s, 3, segMuxed, 0, false); err != nil {
+		if _, err := m.transcodeSegment(context.Background(), s, 3, segMuxed, 0, segLive); err != nil {
 			t.Fatalf("transcode: %v", err)
 		}
 		if n := callCount(t); n != 2 {
@@ -794,7 +794,7 @@ func TestTranscodeSegmentShutdownRefusesRetry(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		go func() {
-			p, err := m.transcodeSegment(context.Background(), s, 3, segMuxed, 0, false) // start 12s > the 10s pre-roll
+			p, err := m.transcodeSegment(context.Background(), s, 3, segMuxed, 0, segLive) // start 12s > the 10s pre-roll
 			done <- result{p, err}
 		}()
 

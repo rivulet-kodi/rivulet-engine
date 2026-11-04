@@ -13,10 +13,11 @@ package media
 //
 //   - walks the session's segments in playback order (video or muxed, then
 //     the selected audio renditions of each index), skipping cached ones;
-//   - transcodes through the low-priority lane of the shared transcode
-//     semaphore (acquireBackgroundSlot): at most PrepareConcurrency at once,
-//     and only while no live request is waiting for a slot. A segment a live
-//     request is transcoding is left to it and revisited later;
+//   - transcodes through the low-priority preparation lane of the shared
+//     transcode semaphore (acquireBackgroundSlot): at most
+//     PrepareConcurrency at once, only while no live request is waiting for
+//     a slot, and after any queued transcode-ahead (ahead.go). A segment a
+//     live request is transcoding is left to it and revisited later;
 //   - pins the segments it prepares: evictSegments never removes them, and
 //     they don't count against the per-session cache cap, so the LRU can't
 //     evict a prepared film as the job goes. An explicit
@@ -94,7 +95,7 @@ const (
 var prepBusyRetry = 2 * time.Second
 
 // errSegmentBusy is returned by a background transcodeSegment when a live
-// request holds the segment's lock.
+// request, or another background transcode, holds the segment's lock.
 var errSegmentBusy = errors.New("hls: segment busy")
 
 // prepState is one session's preparation job state.
@@ -425,7 +426,7 @@ func (m *hlsManager) prepPasses(ctx context.Context, s *hlsSession, rends []prep
 			if segCached(s.dir, name) {
 				s.prep.clearFailed(name)
 			} else {
-				_, err := seg(ctx, s, it.n, it.r.kind, it.r.audioIdx, true)
+				_, err := seg(ctx, s, it.n, it.r.kind, it.r.audioIdx, segPrepare)
 				switch {
 				case stopped():
 					return "", ""

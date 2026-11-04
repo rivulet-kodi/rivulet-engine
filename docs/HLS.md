@@ -208,9 +208,10 @@ How the job behaves:
   `RIVULET_TRANSCODE_CONCURRENCY` slots with live requests, but take one only
   while no live request is waiting, and at most
   `RIVULET_HLS_PREPARE_CONCURRENCY` (default `1`) at once across every
-  session. A running preparation transcode is not interrupted, so with a
-  single slot a live request can wait for up to one segment. A segment a
-  live request is transcoding is left to it.
+  session, after any waiting [transcode-ahead](#transcode-ahead). A running
+  preparation transcode is not interrupted, so with a single slot a live
+  request can wait for up to one segment. A segment a live request is
+  transcoding is left to it.
 - **Pinned segments.** The segments a job prepares are never evicted and
   don't count against the per-session cache cap, so a long film isn't
   evicted while it is prepared; the cap still bounds what live playback
@@ -232,3 +233,43 @@ How the job behaves:
   use of the session, so a restart in the middle of a job keeps it; the
   session's TTL still applies to the time the server is down. Without
   persistence, jobs end with the process.
+
+## Transcode-ahead
+
+`RIVULET_HLS_TRANSCODE_AHEAD=N` makes the engine read ahead for its clients:
+once it has answered a request for segment `n` of a rendition (`seg<n>.ts`,
+or `a<k>seg<n>.ts` for audio stream `k`), it transcodes segments `n+1` to
+`n+N` of that rendition in the background, not past the last one, so they
+are cached by the time the client asks for them. After a seek, the first
+segment is then the only one the client waits for a full transcode of.
+`0`, the default, turns it off exactly as before; values above `30` (two
+minutes) are capped. A session whose duration is unknown (its probe found
+none) gets no transcode-ahead.
+
+- **One worker per session and rendition.** It transcodes one segment at a
+  time, in order, and skips the cached ones. While the client plays on
+  through the window, the same worker carries on and the window moves
+  along; requests that finish out of order, or a step back of up to `N`
+  segments, don't count as a seek. Any other request is a seek: the worker
+  is cancelled as the request arrives, including a transcode it is running,
+  since nobody wants that segment now, and a new one starts once the
+  request is answered. The worker belongs to the session, not to a client,
+  so clients sharing a session far apart replace each other's.
+- **Live requests first.** Transcode-ahead shares the
+  `RIVULET_TRANSCODE_CONCURRENCY` slots with live requests, but takes one
+  only while no live request is waiting, and at most
+  `RIVULET_HLS_TRANSCODE_AHEAD_CONCURRENCY` (default `1`) at once across
+  every session. It goes before [preparation](#preparing-hls-sessions),
+  which uses the same low-priority scheduler. A running transcode is not
+  interrupted for a live request (other than the seek above), so with a
+  single slot a live request can wait for up to one segment. A client that
+  asks for a segment the worker is transcoding waits for that transcode
+  instead of starting another.
+- **Failures.** A segment a live request or preparation is transcoding is
+  left to it. A failed transcode stops the worker; the client's next
+  request starts a new one.
+- **Cache and lifetime.** The segments are cached like any other, under the
+  session's cache cap, and pinned when a preparation of the session covers
+  that rendition. A worker keeps its session from being evicted while it
+  runs, but doesn't count as an access, so a session nobody plays still
+  goes idle by its TTL. `DELETE /hlsv2/{id}` and shutdown stop it.

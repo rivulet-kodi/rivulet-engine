@@ -63,6 +63,18 @@ type HLSConfig struct {
 	// the SegmentConcurrency slots with live requests but only take one
 	// while no live request is waiting for it. 0 resolves to 1.
 	PrepareConcurrency int
+	// TranscodeAhead is how many segments past the last one a client
+	// requested the engine transcodes in the background, per rendition, so
+	// they are cached by the time the client asks (RIVULET_HLS_TRANSCODE_AHEAD).
+	// 0 (the default) turns it off, exactly as before; values above
+	// MaxTranscodeAhead are capped. See ahead.go.
+	TranscodeAhead int
+	// AheadConcurrency is the most transcode-ahead segment transcodes at
+	// once across every session (RIVULET_HLS_TRANSCODE_AHEAD_CONCURRENCY).
+	// Like preparation's, they share the SegmentConcurrency slots with live
+	// requests but only take one while no live request is waiting for it,
+	// and go before preparation's. 0 resolves to 1.
+	AheadConcurrency int
 
 	// --- output quality / bandwidth ---
 	VideoBitrate string // -b:v, e.g. "8M" (RIVULET_TRANSCODE_VIDEO_BITRATE)
@@ -135,6 +147,14 @@ type HLSConfig struct {
 // defaultPrepareConcurrency keeps preparation to one background transcode at
 // a time, so live sessions keep the rest of the slots.
 const defaultPrepareConcurrency = 1
+
+// defaultAheadConcurrency keeps transcode-ahead to one background transcode
+// at a time.
+const defaultAheadConcurrency = 1
+
+// MaxTranscodeAhead caps HLSConfig.TranscodeAhead: 30 segments of 4 s are
+// two minutes, past what a player buffers.
+const MaxTranscodeAhead = 30
 
 // SeekPrerollNone is the HLSConfig.SeekPreroll value meaning "no pre-roll"
 // (pure input seek). A literal 0 cannot carry that meaning because 0 is the
@@ -213,6 +233,7 @@ func DefaultHLSConfig() HLSConfig {
 		AudioBitrate:       defaultAudioBitrate,
 		SegmentConcurrency: 0,
 		PrepareConcurrency: defaultPrepareConcurrency,
+		AheadConcurrency:   defaultAheadConcurrency,
 		VAAPIDevice:        defaultVAAPIDevice,
 		SegmentTimeout:     defaultSegmentTimeout,
 		SubtitleTimeout:    defaultSubtitleTTL,
@@ -302,6 +323,15 @@ func (c HLSConfig) normalize(numCPU int) HLSConfig {
 	}
 	if c.PrepareConcurrency <= 0 {
 		c.PrepareConcurrency = defaultPrepareConcurrency
+	}
+	if c.TranscodeAhead < 0 {
+		c.TranscodeAhead = 0
+	}
+	if c.TranscodeAhead > MaxTranscodeAhead {
+		c.TranscodeAhead = MaxTranscodeAhead
+	}
+	if c.AheadConcurrency <= 0 {
+		c.AheadConcurrency = defaultAheadConcurrency
 	}
 	if c.SegmentTimeout <= 0 {
 		c.SegmentTimeout = d.SegmentTimeout

@@ -80,14 +80,14 @@ type fakeTranscoder struct {
 	t     *testing.T
 	mu    sync.Mutex
 	calls []string
-	bg    []bool
+	prio  []segPriority
 }
 
-func (f *fakeTranscoder) fn(_ context.Context, s *hlsSession, n int, kind segKind, audioIdx int, bg bool) (string, error) {
+func (f *fakeTranscoder) fn(_ context.Context, s *hlsSession, n int, kind segKind, audioIdx int, prio segPriority) (string, error) {
 	name := segName(n, kind, audioIdx)
 	f.mu.Lock()
 	f.calls = append(f.calls, name)
-	f.bg = append(f.bg, bg)
+	f.prio = append(f.prio, prio)
 	f.mu.Unlock()
 	return writeFakeSegment(f.t, s, name), nil
 }
@@ -232,9 +232,9 @@ func TestPrepareHLSPreparesEverySegment(t *testing.T) {
 	if got := f.got(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("transcoded %v, want %v (playback order, cached skipped)", got, want)
 	}
-	for i, bg := range f.bg {
-		if !bg {
-			t.Errorf("transcode %d was not a background transcode", i)
+	for i, prio := range f.prio {
+		if prio != segPrepare {
+			t.Errorf("transcode %d had priority %d, want a preparation transcode", i, prio)
 		}
 	}
 	if st.Cached != 6 || st.Uncached != 0 || st.Failed != 0 || st.CachedBytes != 6*int64(len("segment")) {
@@ -258,7 +258,7 @@ func TestPrepareHLSPreparesEverySegment(t *testing.T) {
 func TestPrepareHoldsSessionAgainstReaper(t *testing.T) {
 	m := newPrepManager(t)
 	release := make(chan struct{})
-	m.transcode = func(ctx context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+	m.transcode = func(ctx context.Context, s *hlsSession, n int, kind segKind, k int, _ segPriority) (string, error) {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -334,7 +334,7 @@ func TestPrepareHLSFailures(t *testing.T) {
 	t.Run("retried once", func(t *testing.T) {
 		m := newPrepManager(t)
 		var seg1 atomic.Int32
-		m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+		m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ segPriority) (string, error) {
 			if n == 1 && seg1.Add(1) == 1 {
 				return "", errors.New("hls: transcode seg1.ts: boom")
 			}
@@ -352,7 +352,7 @@ func TestPrepareHLSFailures(t *testing.T) {
 	t.Run("stops after repeated errors", func(t *testing.T) {
 		m := newPrepManager(t)
 		var calls atomic.Int32
-		m.transcode = func(context.Context, *hlsSession, int, segKind, int, bool) (string, error) {
+		m.transcode = func(context.Context, *hlsSession, int, segKind, int, segPriority) (string, error) {
 			calls.Add(1)
 			return "", errors.New("hls: transcode: source failed: 429")
 		}
@@ -376,7 +376,7 @@ func TestPrepareHLSFailures(t *testing.T) {
 func TestPrepareHLSUncached(t *testing.T) {
 	m := newPrepManager(t)
 	var seg0 atomic.Int32
-	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ segPriority) (string, error) {
 		name := segName(n, kind, k)
 		if n != 0 {
 			return writeFakeSegment(t, s, name), nil
@@ -410,7 +410,7 @@ func TestPrepareHLSRevisitsBusySegments(t *testing.T) {
 	t.Cleanup(func() { prepBusyRetry = saved })
 	m := newPrepManager(t)
 	var seg0 atomic.Int32
-	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ segPriority) (string, error) {
 		name := segName(n, kind, k)
 		if n == 0 && seg0.Add(1) == 1 {
 			writeFakeSegment(t, s, name) // the live request finishes it
@@ -429,8 +429,8 @@ func TestPrepareHLSRevisitsBusySegments(t *testing.T) {
 }
 
 // blockingTranscoder blocks every call until its context is done.
-func blockingTranscoder(started chan<- struct{}) func(context.Context, *hlsSession, int, segKind, int, bool) (string, error) {
-	return func(ctx context.Context, _ *hlsSession, _ int, _ segKind, _ int, _ bool) (string, error) {
+func blockingTranscoder(started chan<- struct{}) func(context.Context, *hlsSession, int, segKind, int, segPriority) (string, error) {
+	return func(ctx context.Context, _ *hlsSession, _ int, _ segKind, _ int, _ segPriority) (string, error) {
 		select {
 		case started <- struct{}{}:
 		default:
@@ -649,17 +649,17 @@ func TestTranscodeSegmentBackground(t *testing.T) {
 	s := injectPrepSession(t, m, "film", 8, nil)
 	l := s.lockFor("seg0.ts")
 	l.Lock()
-	_, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0, true)
+	_, err := m.transcodeSegment(context.Background(), s, 0, segMuxed, 0, segPrepare)
 	l.Unlock()
 	if !errors.Is(err, errSegmentBusy) {
 		t.Errorf("background transcode of a locked segment = %v, want errSegmentBusy", err)
 	}
 	want := writeFakeSegment(t, s, "seg1.ts")
-	if p, err := m.transcodeSegment(context.Background(), s, 1, segMuxed, 0, true); err != nil || p != want {
+	if p, err := m.transcodeSegment(context.Background(), s, 1, segMuxed, 0, segPrepare); err != nil || p != want {
 		t.Errorf("background transcode of a cached segment = %q, %v", p, err)
 	}
 	m.slots.mu.Lock()
-	held, lowHeld := m.slots.held, m.slots.lowHeld
+	held, lowHeld := m.slots.held, m.slots.lanes[lanePrepare].held
 	m.slots.mu.Unlock()
 	if held != 0 || lowHeld != 0 {
 		t.Errorf("slots leaked: held %d, lowHeld %d", held, lowHeld)
@@ -673,7 +673,7 @@ func waitLowWaiters(t *testing.T, s *slotSem, n int) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		s.mu.Lock()
-		got := s.low.Len()
+		got := s.lanes[lanePrepare].waiters.Len()
 		s.mu.Unlock()
 		if got == n {
 			return
@@ -698,7 +698,7 @@ func TestSlotSemLowPriority(t *testing.T) {
 	}
 	order := make(chan string, 3)
 	go func() {
-		if s.acquireLow(bg, limitFn, 1) == nil {
+		if s.acquireLow(bg, limitFn, lanePrepare, 1) == nil {
 			order <- "low"
 		}
 	}()
@@ -722,20 +722,20 @@ func TestSlotSemLowPriority(t *testing.T) {
 	s.release(limitFn)
 	ctx, cancel := context.WithTimeout(bg, 50*time.Millisecond)
 	defer cancel()
-	if err := s.acquireLow(ctx, limitFn, 1); !errors.Is(err, context.DeadlineExceeded) {
+	if err := s.acquireLow(ctx, limitFn, lanePrepare, 1); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("second low acquire = %v, want it to wait past the lane limit", err)
 	}
 	// A regular acquire still gets the free slot at once.
 	if err := s.acquire(bg, limitFn); err != nil {
 		t.Fatal(err)
 	}
-	s.releaseLow(limitFn)
+	s.releaseLow(limitFn, lanePrepare)
 	s.release(limitFn) // the regular waiter's slot
 	s.release(limitFn) // the last regular acquire's
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.held != 0 || s.lowHeld != 0 || s.low.Len() != 0 || s.waiters.Len() != 0 {
-		t.Errorf("after releasing everything: held %d, lowHeld %d, low %d, waiters %d", s.held, s.lowHeld, s.low.Len(), s.waiters.Len())
+	if s.held != 0 || s.lanes[lanePrepare].held != 0 || s.lanes[lanePrepare].waiters.Len() != 0 || s.waiters.Len() != 0 {
+		t.Errorf("after releasing everything: held %d, lowHeld %d, low %d, waiters %d", s.held, s.lanes[lanePrepare].held, s.lanes[lanePrepare].waiters.Len(), s.waiters.Len())
 	}
 }
 
@@ -745,13 +745,13 @@ func TestSlotSemLowLimitZeroAndCancel(t *testing.T) {
 	var s slotSem
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := s.acquireLow(ctx, limitFn, 0); !errors.Is(err, context.DeadlineExceeded) {
+	if err := s.acquireLow(ctx, limitFn, lanePrepare, 0); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("acquireLow with lane limit 0 = %v, want a timeout", err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.low.Len() != 0 || s.held != 0 || s.lowHeld != 0 {
-		t.Errorf("after a cancelled low waiter: low %d, held %d, lowHeld %d", s.low.Len(), s.held, s.lowHeld)
+	if s.lanes[lanePrepare].waiters.Len() != 0 || s.held != 0 || s.lanes[lanePrepare].held != 0 {
+		t.Errorf("after a cancelled low waiter: low %d, held %d, lowHeld %d", s.lanes[lanePrepare].waiters.Len(), s.held, s.lanes[lanePrepare].held)
 	}
 }
 
@@ -762,7 +762,7 @@ func TestPrepareRefreshesLastAccess(t *testing.T) {
 	m := newPrepManager(t)
 	old := time.Now().Add(-time.Hour).UnixNano()
 	var sawRefresh atomic.Bool
-	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ segPriority) (string, error) {
 		switch n {
 		case 0:
 			s.lastAccess.Store(old) // as if seg0 took an hour
@@ -815,7 +815,7 @@ func TestPrepareStoppedByShutdownIsIdle(t *testing.T) {
 	m := newPrepManager(t)
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
-	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ segPriority) (string, error) {
 		started <- struct{}{}
 		<-release
 		return writeFakeSegment(t, s, segName(n, kind, k)), nil
@@ -913,7 +913,7 @@ func TestSlotSemRaisedLimitPrefersRegular(t *testing.T) {
 	lowCtx, lowCancel := context.WithCancel(bg)
 	defer lowCancel()
 	lowDone := make(chan error, 1)
-	go func() { lowDone <- s.acquireLow(lowCtx, one, 1) }()
+	go func() { lowDone <- s.acquireLow(lowCtx, one, lanePrepare, 1) }()
 	waitLowWaiters(t, &s, 1)
 	ctx, cancel := context.WithTimeout(bg, time.Second)
 	defer cancel()
@@ -921,7 +921,7 @@ func TestSlotSemRaisedLimitPrefersRegular(t *testing.T) {
 		t.Fatalf("regular acquire after a limit raise = %v, want the freed slot", err)
 	}
 	s.mu.Lock()
-	lowHeld := s.lowHeld
+	lowHeld := s.lanes[lanePrepare].held
 	s.mu.Unlock()
 	if lowHeld != 0 {
 		t.Error("the low-priority waiter took the freed slot ahead of the regular acquire")
@@ -973,7 +973,7 @@ func TestResumePreparedKeepsUnreadableFile(t *testing.T) {
 func TestPrepareConsecutiveResetsPerPass(t *testing.T) {
 	m := newPrepManager(t)
 	var calls atomic.Int32
-	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ bool) (string, error) {
+	m.transcode = func(_ context.Context, s *hlsSession, n int, kind segKind, k int, _ segPriority) (string, error) {
 		// Pass 1: seg0 ok, seg1 and seg2 fail. Pass 2: seg1 fails again
 		// (3 errors overall, but only 2 in a row per pass), seg2 succeeds.
 		c := calls.Add(1)
