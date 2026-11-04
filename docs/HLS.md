@@ -232,3 +232,44 @@ How the job behaves:
   use of the session, so a restart in the middle of a job keeps it; the
   session's TTL still applies to the time the server is down. Without
   persistence, jobs end with the process.
+
+## Relay cache for remote sources
+
+Every HLS segment is a fresh `ffmpeg` run, and each one reads the source's
+container header and index again before it seeks to the segment's data. For
+Matroska, or MP4 with its index at the end, that is about four range
+requests per segment, of which only the last one is new; a faststart MP4
+takes two. Against a host that takes ~400 ms to the first byte (debrid
+hosts often do), the repeated requests cost over a second per segment.
+
+`RIVULET_HLS_RELAY_CACHE_BYTES` (off by default) gives the loopback relay
+that every remote `ffmpeg` input goes through that much memory to answer
+those reads itself:
+
+- **What is kept.** The bytes relayed from an offset `ffmpeg` has asked a
+  source for before, up to a quarter of the budget per range; the least
+  recently used ranges go first. A data read at a new offset is never
+  buffered, so in steady state each segment makes one upstream request.
+  Reads being recorded reserve their bytes too, up to the budget again, so
+  the cache can use up to twice the setting at once.
+- **What is answered.** A request at a recorded offset, or inside a
+  recorded range, gets the recorded `206` headers and bytes. Bytes past the
+  recorded ones are fetched from upstream as a range of their own: at once
+  for a closed range, and for an open one after a short wait for `ffmpeg`
+  to close the request first, which it usually does.
+- **What is compared.** Only a single-range `GET` answered by a plain `206`
+  for exactly the range asked, with a known total length, is recorded or
+  compared; never a playlist, a manifest, a compressed or shortened
+  response, a body longer than its range, or an error. Each one is compared
+  on its total length, `ETag` and `Last-Modified`, and a difference turns
+  the cache off for that source for good, whether the file changed or the
+  servers behind the URL disagree. When the difference shows up while
+  finishing an answer from memory, that one transfer fails rather than mix
+  two files. A source with neither validator is compared on its length
+  alone.
+- **Lifetime.** Ranges belong to the relay token, one per upstream URL, so
+  sessions of the same URL share them, and go with the token.
+
+An answer from memory is sniffed at its own offset, as an upstream response
+would be, and every upstream request, continuations included, goes through
+the same client as without the cache.

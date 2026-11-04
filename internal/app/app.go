@@ -711,6 +711,11 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		logging.For("config").Warn("negative RIVULET_TRANSCODE_MAX_HEIGHT", "value", maxHeight, "default", d.MaxHeight)
 		maxHeight = d.MaxHeight
 	}
+	relayCacheBytes := envInt64(lookup, "RIVULET_HLS_RELAY_CACHE_BYTES", d.RelayCacheBytes)
+	if relayCacheBytes < 0 {
+		logging.For("config").Warn("negative RIVULET_HLS_RELAY_CACHE_BYTES; cache off", "value", relayCacheBytes)
+		relayCacheBytes = 0
+	}
 	return media.HLSConfig{
 		SessionTTL:     sessionTTL,
 		ReaperInterval: envDuration(lookup, "RIVULET_HLS_REAPER_INTERVAL", media.DefaultReaperInterval(sessionTTL)),
@@ -760,6 +765,10 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		// Private hosts a media URL may point at (RIVULET_HLS_PRIVATE_ALLOW);
 		// unset allows none.
 		PrivateAllow: envPrivateAllow(lookup, "RIVULET_HLS_PRIVATE_ALLOW"),
+
+		// Memory for the relay's header/index cache
+		// (RIVULET_HLS_RELAY_CACHE_BYTES); 0 = off.
+		RelayCacheBytes: relayCacheBytes,
 	}
 }
 
