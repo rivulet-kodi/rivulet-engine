@@ -147,6 +147,8 @@ type hlsSession struct {
 	// prepares, which evictSegments never removes (see prepare.go).
 	prep prepState
 	pins atomic.Pointer[pinSet]
+	// ahead is the session's transcode-ahead workers (see ahead.go).
+	ahead aheadState
 }
 
 // idleTTL returns the idle-eviction window that applies to s: its own
@@ -242,9 +244,9 @@ type hlsManager struct {
 	// Probe/Tracks/StartHLS share one semaphore.
 	guard  probeGuard
 	shared *probeGuard
-	// transcode is the segment-transcode seam used by preparation jobs; nil
-	// means transcodeSegment. Only tests set it.
-	transcode func(ctx context.Context, s *hlsSession, n int, kind segKind, audioIdx int, bg bool) (string, error)
+	// transcode is the segment-transcode seam used by preparation jobs and
+	// transcode-ahead workers; nil means transcodeSegment. Only tests set it.
+	transcode func(ctx context.Context, s *hlsSession, n int, kind segKind, audioIdx int, prio segPriority) (string, error)
 	// resumeOnce makes ResumePrepared run once (see prepare.go).
 	resumeOnce atomic.Bool
 }
@@ -1131,10 +1133,12 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 		if multiAudio {
 			kind = segVideoOnly
 		}
-		p, err := m.transcodeSegment(ctx, s, n, kind, 0, false)
+		m.aheadSeek(s, n, kind, 0)
+		p, err := m.transcodeSegment(ctx, s, n, kind, 0, segLive)
 		if err != nil {
 			return "", "", err
 		}
+		m.transcodeAhead(id, s, n, kind, 0, sessionDur)
 		return p, "video/mp2t", nil
 	}
 
@@ -1160,10 +1164,12 @@ func (m *hlsManager) HLSFile(ctx context.Context, id, name string) (string, stri
 				return "", "", fmt.Errorf("hls: segment %d beyond media duration (%.0fs)", n, sessionDur)
 			}
 		}
-		p, err := m.transcodeSegment(ctx, s, n, segAudioOnly, k, false)
+		m.aheadSeek(s, n, segAudioOnly, k)
+		p, err := m.transcodeSegment(ctx, s, n, segAudioOnly, k, segLive)
 		if err != nil {
 			return "", "", err
 		}
+		m.transcodeAhead(id, s, n, segAudioOnly, k, sessionDur)
 		return p, "video/mp2t", nil
 	}
 
@@ -1401,16 +1407,38 @@ const subtitleConcurrency = 2
 // subtitleLimit is the fixed limit for hlsManager.subs.
 func subtitleLimit() int { return subtitleConcurrency }
 
+// segPriority says who a segment transcode is for, which decides how it
+// gets a transcode slot (see transcodeSegment).
+type segPriority int
+
+const (
+	segLive    segPriority = iota // a client's request: a regular slot
+	segAhead                      // transcode-ahead (ahead.go): low priority, before preparation
+	segPrepare                    // preparation (prepare.go): low priority
+)
+
+// lane returns the slotSem lane of a background priority, and its limit.
+func (m *hlsManager) lane(prio segPriority) (lane, limit int) {
+	if prio == segAhead {
+		return laneAhead, m.cfg.AheadConcurrency
+	}
+	return lanePrepare, m.cfg.PrepareConcurrency
+}
+
 // acquireBackgroundSlot is acquireTranscodeSlot for background work
-// (preparation): it takes a slot only while no live request is waiting for
-// one, and at most cfg.PrepareConcurrency at once (see slotSem.acquireLow).
-func (m *hlsManager) acquireBackgroundSlot(ctx context.Context) error {
-	return m.slots.acquireLow(ctx, m.currentConcurrency, m.cfg.PrepareConcurrency)
+// (transcode-ahead or preparation, per prio): it takes a slot only while no
+// live request is waiting for one, after any queued transcode-ahead waiter
+// for preparation, and at most cfg.AheadConcurrency or
+// cfg.PrepareConcurrency at once (see slotSem.acquireLow).
+func (m *hlsManager) acquireBackgroundSlot(ctx context.Context, prio segPriority) error {
+	lane, limit := m.lane(prio)
+	return m.slots.acquireLow(ctx, m.currentConcurrency, lane, limit)
 }
 
 // releaseBackgroundSlot releases a slot acquired by acquireBackgroundSlot.
-func (m *hlsManager) releaseBackgroundSlot() {
-	m.slots.releaseLow(m.currentConcurrency)
+func (m *hlsManager) releaseBackgroundSlot(prio segPriority) {
+	lane, _ := m.lane(prio)
+	m.slots.releaseLow(m.currentConcurrency, lane)
 }
 
 // acquireTranscodeSlot blocks until a concurrent-transcode slot is available
@@ -1504,12 +1532,13 @@ func (m *hlsManager) currentConcurrency() int {
 // sessionFormatVersion (persist.go) so old segments are discarded instead of
 // being spliced with new ones.
 //
-// bg marks a background (preparation) transcode: it takes a low-priority slot
-// (acquireBackgroundSlot) before the segment's lock, and only TryLocks that,
-// returning errSegmentBusy when a live request holds it. A live request that
-// holds the lock while it waits for a slot can then never be stuck behind a
-// background job that holds a slot while it waits for the lock.
-func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int, kind segKind, audioIdx int, bg bool) (string, error) {
+// A background transcode (prio segAhead or segPrepare) takes a low-priority
+// slot (acquireBackgroundSlot) before the segment's lock, and only TryLocks
+// that, returning errSegmentBusy when a live request (or another background
+// transcode) holds it. A live request that holds the lock while it waits for
+// a slot can then never be stuck behind a background job that holds a slot
+// while it waits for the lock.
+func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int, kind segKind, audioIdx int, prio segPriority) (string, error) {
 	s.mu.RLock()
 	sessionDur := s.duration
 	highBitDepth := s.highBitDepth
@@ -1529,11 +1558,12 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	segFile := filepath.Join(s.dir, filename)
 
 	l := s.lockFor(filename)
+	bg := prio != segLive
 	if bg {
-		if err := m.acquireBackgroundSlot(ctx); err != nil {
+		if err := m.acquireBackgroundSlot(ctx, prio); err != nil {
 			return "", err
 		}
-		defer m.releaseBackgroundSlot()
+		defer m.releaseBackgroundSlot(prio)
 		if !l.TryLock() {
 			return "", errSegmentBusy
 		}
@@ -2080,6 +2110,8 @@ func (m *hlsManager) DeleteHLS(id string) error {
 	idle := s.inFlight.Load() == 0
 	m.mu.Unlock()
 	s.prep.cancelJob() // a running preparation holds inFlight; stop it
+	// Transcode-ahead workers hold inFlight too.
+	s.ahead.cancelAll()
 
 	if idle {
 		m.removeDeletedSession(id, s)
