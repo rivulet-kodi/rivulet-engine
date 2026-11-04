@@ -15,16 +15,18 @@ import (
 	"testing"
 )
 
-// ── relayInput: selfBase pass-through vs. relay routing ─────────────────────
+// ── relayInput: selfBase and remote inputs both go through the relay ────────
 
-func TestRelayInputSelfBasePassThrough(t *testing.T) {
+func TestRelayInputSelfBaseRoutesThroughRelay(t *testing.T) {
 	const self = "http://127.0.0.1:11470"
 	inputURL, protoWL, err := relayInput(self+testSelfPath, self)
 	if err != nil {
 		t.Fatalf("relayInput: %v", err)
 	}
-	if inputURL != self+testSelfPath {
-		t.Errorf("selfBase input rewritten to %q, want pass-through %q", inputURL, self+testSelfPath)
+	// Never the direct URL (issue #69): local content may be an HLS playlist
+	// whose entries ffmpeg would fetch itself.
+	if !strings.HasPrefix(inputURL, "http://127.0.0.1:") || !strings.Contains(inputURL, "/r/") {
+		t.Errorf("selfBase input = %q, want a loopback relay token URL", inputURL)
 	}
 	// Plain loopback HTTP only (issue #65): localize already maps the https UI
 	// origin onto http, so https/tls/crypto are never needed here.

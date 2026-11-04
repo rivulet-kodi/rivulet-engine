@@ -4,10 +4,10 @@
 
 package media
 
-// Tests for the self-origin media-route check (issue #65): a mediaURL on
-// this server's own origin is read directly when its route serves local
-// content, read through the media relay when the route passes a remote body
-// through (/proxy, /ftp, /yt), and refused otherwise.
+// Tests for the self-origin media-route check (issues #65, #69): a mediaURL
+// on this server's own origin is read through the media relay when its route
+// serves local content or passes a remote body through (/proxy, /ftp, /yt),
+// and refused otherwise.
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -33,9 +34,13 @@ const testSelfIH = "0123456789abcdef0123456789abcdef01234567"
 // canonical local-content self path every self-origin test URL uses.
 const testSelfPath = "/" + testSelfIH + "/0"
 
-func TestClassifySelfPath(t *testing.T) {
-	cases := map[selfPathKind][]string{
-		selfPathLocal: {
+// testSelfPlaylistPath is a torrent-file path whose content is an HLS
+// playlist with hostile entries (issue #69); see fakeSelfOrigin.
+const testSelfPlaylistPath = "/" + testSelfIH + "/1"
+
+func TestIsSelfMediaPath(t *testing.T) {
+	cases := map[bool][]string{
+		true: {
 			testSelfPath,
 			"/0123456789ABCDEF0123456789ABCDEF01234567/0",
 			"/" + testSelfIH + "/-1",
@@ -56,8 +61,6 @@ func TestClassifySelfPath(t *testing.T) {
 			"/nzb/stream/key",
 			"/nzb/stream/key/movie.mkv",
 			"/local-addon/file/abc123",
-		},
-		selfPathRelayed: {
 			// stremio-core's proxyHeaders form: /proxy/{d=…&h=…}/{path}.
 			"/proxy/d=http%3A%2F%2Fexample.com&h=User-Agent%3Ax/path/playlist.m3u8",
 			"/proxy/d=http%3A%2F%2Fexample.com/",
@@ -66,7 +69,7 @@ func TestClassifySelfPath(t *testing.T) {
 			"/ftp/movie.mkv",
 			"/yt/dQw4w9WgXcQ",
 		},
-		selfPathRefused: {
+		false: {
 			"",
 			"/",
 			"/removeAll",
@@ -115,8 +118,8 @@ func TestClassifySelfPath(t *testing.T) {
 	}
 	for want, paths := range cases {
 		for _, p := range paths {
-			if got := classifySelfPath(p); got != want {
-				t.Errorf("classifySelfPath(%q) = %d, want %d", p, got, want)
+			if got := isSelfMediaPath(p); got != want {
+				t.Errorf("isSelfMediaPath(%q) = %v, want %v", p, got, want)
 			}
 		}
 	}
@@ -162,33 +165,32 @@ func TestValidateMediaURLSelfOriginPaths(t *testing.T) {
 	}
 }
 
-// TestRelayInputSelfRoutes: local routes go to ffmpeg directly, pass-through
-// routes go through the relay, and anything else is refused here too, so a
-// caller that skipped validateMediaURL still cannot hand ffmpeg a control
-// route. The whitelist is "http,tcp" for all of them.
+// TestRelayInputSelfRoutes: local and pass-through routes both go through
+// the relay (never to ffmpeg directly, issue #69), and anything else is
+// refused here too, so a caller that skipped validateMediaURL still cannot
+// hand ffmpeg a control route. The whitelist is "http,tcp" for all of them.
 func TestRelayInputSelfRoutes(t *testing.T) {
 	const self = "http://127.0.0.1:11470"
-	for _, tc := range []struct {
-		path    string
-		relayed bool
-	}{
-		{testSelfPath, false},
-		{"/rar/create?lz=x", false},
-		{"/nzb/stream/key", false},
-		{"/proxy/d=http%3A%2F%2Fexample.com/v.m3u8", true},
-		{"/ftp/movie.mkv?lz=x", true},
-		{"/yt/dQw4w9WgXcQ", true},
+	for _, path := range []string{
+		testSelfPath,
+		"/stream/" + testSelfIH + "/0",
+		"/rar/create?lz=x",
+		"/nzb/stream/key",
+		"/local-addon/file/abc123",
+		"/proxy/d=http%3A%2F%2Fexample.com/v.m3u8",
+		"/ftp/movie.mkv?lz=x",
+		"/yt/dQw4w9WgXcQ",
 	} {
-		in, wl, err := relayInput(self+tc.path, self)
+		in, wl, err := relayInput(self+path, self)
 		if err != nil {
-			t.Errorf("relayInput(%s): %v", tc.path, err)
+			t.Errorf("relayInput(%s): %v", path, err)
 			continue
 		}
 		if wl != "http,tcp" {
-			t.Errorf("relayInput(%s) whitelist = %q, want http,tcp", tc.path, wl)
+			t.Errorf("relayInput(%s) whitelist = %q, want http,tcp", path, wl)
 		}
-		if got := strings.Contains(in, "/r/"); got != tc.relayed {
-			t.Errorf("relayInput(%s) = %q, relayed = %v, want %v", tc.path, in, got, tc.relayed)
+		if !strings.Contains(in, "/r/") {
+			t.Errorf("relayInput(%s) = %q, want a relay token URL", path, in)
 		}
 	}
 	for _, p := range []string{"/removeAll", "/extractor/x", "/x/0"} {
@@ -282,6 +284,20 @@ func fakeSelfOrigin(t *testing.T) (self, private *hitRecorder, selfURL, privateU
 		case "/proxy/d=x/seg0.ts":
 			_, _ = io.WriteString(w, "SEG")
 		case testSelfPath:
+			_, _ = io.WriteString(w, "LOCAL")
+		case testSelfPlaylistPath:
+			// Local content (a torrent file named x.m3u8) that is itself an
+			// HLS playlist; the file routes type it by extension. Issue #69.
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			_, _ = fmt.Fprintf(w, "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"+
+				"#EXTINF:4,\n%s/private.ts\n"+
+				"#EXTINF:4,\n%s/removeAll/x.ts\n"+
+				"#EXTINF:4,\nseg0.ts\n"+ // relative: <self>/<ih>/seg0.ts
+				"#EXTINF:4,\n%s/%s/clip.ts\n"+ // ffmpeg only accepts entries with a media extension
+				"#EXT-X-ENDLIST\n", ps.URL, ss.URL, ss.URL, testSelfIH)
+		case "/" + testSelfIH + "/seg0.ts":
+			_, _ = io.WriteString(w, "SEG")
+		case "/" + testSelfIH + "/clip.ts":
 			_, _ = io.WriteString(w, "LOCAL")
 		case "/yt/to-removeall":
 			http.Redirect(w, r, "/removeAll", http.StatusTemporaryRedirect)
@@ -526,5 +542,144 @@ func TestValidateMediaURLErrorsAreInvalidMediaURL(t *testing.T) {
 	err := validateMediaURL("ftp://example.com/x", self, nil)
 	if err == nil || !strings.Contains(err.Error(), "unsupported URL scheme") {
 		t.Errorf("message lost: %v", err)
+	}
+}
+
+// TestRelaySelfLocalPlaylist is issue #69: local content (here a torrent
+// file) that is itself an HLS playlist is read through the relay like any
+// other, so its entries are classified. A self control route becomes a dead
+// token, a private host goes through the guarded client, and a relative or
+// local-content entry on this origin stays reachable.
+func TestRelaySelfLocalPlaylist(t *testing.T) {
+	self, private, selfURL, privateURL := fakeSelfOrigin(t)
+	in, _, err := relayInput(selfURL+testSelfPlaylistPath, selfURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(in, "/r/") {
+		t.Fatalf("relayInput(local playlist) = %q; want a relay token, not the direct URL", in)
+	}
+	code, body := selfRelayGet(t, in)
+	if code != http.StatusOK {
+		t.Fatalf("relayed playlist = %d %q", code, body)
+	}
+	if strings.Contains(body, selfURL) || strings.Contains(body, privateURL) {
+		t.Fatalf("rewritten playlist still names an upstream host:\n%s", body)
+	}
+	var entries []string
+	for _, l := range strings.Split(body, "\n") {
+		if l != "" && !strings.HasPrefix(l, "#") {
+			entries = append(entries, l)
+		}
+	}
+	if len(entries) != 4 {
+		t.Fatalf("rewritten playlist has %d entries, want 4:\n%s", len(entries), body)
+	}
+	if code, _ := selfRelayGet(t, entries[0]); code != http.StatusBadGateway {
+		t.Errorf("private-host entry = %d, want 502 (dial refused)", code)
+	}
+	if !strings.HasSuffix(entries[1], "/r/refused") {
+		t.Errorf("self /removeAll entry rewritten to %q, want a dead /r/refused token", entries[1])
+	}
+	if code, b := selfRelayGet(t, entries[2]); code != http.StatusOK || b != "SEG" {
+		t.Errorf("relative entry = %d %q, want 200 SEG", code, b)
+	}
+	if code, b := selfRelayGet(t, entries[3]); code != http.StatusOK || b != "LOCAL" {
+		t.Errorf("local-content entry = %d %q, want 200 LOCAL", code, b)
+	}
+	if self.hit("/removeAll/x.ts") {
+		t.Error("self /removeAll/x.ts was requested through the relay")
+	}
+	if hits := private.paths(); len(hits) != 0 {
+		t.Errorf("private host was requested %v through the relay", hits)
+	}
+}
+
+// TestRelaySelfLocalMediaRange: plain local media still streams through the
+// relay, byte ranges included, so ffmpeg can seek in it.
+func TestRelaySelfLocalMediaRange(t *testing.T) {
+	const content = "0123456789"
+	rec := &hitRecorder{h: func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "movie.mkv", time.Time{}, strings.NewReader(content))
+	}}
+	ts := httptest.NewServer(rec)
+	defer ts.Close()
+	in, _, err := relayInput(ts.URL+testSelfPath, ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, b := selfRelayGet(t, in); code != http.StatusOK || b != content {
+		t.Fatalf("local media via relay = %d %q, want 200 %q", code, b, content)
+	}
+	req, _ := http.NewRequest(http.MethodGet, in, nil)
+	req.Header.Set("Range", "bytes=4-6")
+	resp, err := selfRelayTestClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusPartialContent || string(b) != "456" ||
+		resp.Header.Get("Content-Range") != "bytes 4-6/10" {
+		t.Errorf("range via relay = %d %q %q, want 206 456 bytes 4-6/10",
+			resp.StatusCode, b, resp.Header.Get("Content-Range"))
+	}
+}
+
+// TestProbeContextSelfLocalPlaylist is issue #69 through ffprobe itself:
+// ProbeContext on a local-content URL that is an HLS playlist whose entries
+// name self /removeAll and a private host must reach neither. Skipped
+// without ffprobe.
+func TestProbeContextSelfLocalPlaylist(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not on PATH")
+	}
+	self, private, selfURL, _ := fakeSelfOrigin(t)
+	p := newTestProber()
+	p.baseURLLocal = selfURL
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, perr := p.ProbeContext(ctx, selfURL+testSelfPlaylistPath)
+	t.Logf("probe err %v; self hits %v; private hits %v", perr, self.paths(), private.paths())
+	if !self.hit(testSelfPlaylistPath) {
+		t.Fatalf("ffprobe never read the playlist; hits %v", self.paths())
+	}
+	if self.hit("/removeAll/x.ts") {
+		t.Error("ffprobe reached self /removeAll through a local playlist entry")
+	}
+	if hits := private.paths(); len(hits) != 0 {
+		t.Errorf("ffprobe reached the private host %v through a local playlist entry", hits)
+	}
+}
+
+// TestProbeContextSelfLocalMedia: ordinary local video behind a self route
+// is still probed through the relay (issue #69), seeking by byte range.
+// Skipped without ffmpeg and ffprobe.
+func TestProbeContextSelfLocalMedia(t *testing.T) {
+	for _, bin := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skip(bin + " not on PATH")
+		}
+	}
+	file := filepath.Join(t.TempDir(), "movie.mp4")
+	if out, err := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=1:duration=1",
+		"-c:v", "mpeg4", file).CombinedOutput(); err != nil {
+		t.Skipf("cannot generate a test video: %v: %s", err, out)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, file)
+	}))
+	defer ts.Close()
+	p := newTestProber()
+	p.baseURLLocal = ts.URL
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res, err := p.ProbeContext(ctx, ts.URL+testSelfPath)
+	if err != nil {
+		t.Fatalf("ProbeContext(local video): %v", err)
+	}
+	streams, _ := res.(map[string]interface{})["streams"].([]interface{})
+	if len(streams) != 1 {
+		t.Errorf("probe found %d streams, want 1: %v", len(streams), res)
 	}
 }

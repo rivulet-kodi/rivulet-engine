@@ -83,7 +83,7 @@ type relayEntry struct {
 	url       string
 	expiresAt time.Time
 	// self is the server's own origin (selfBase) when url is a media route
-	// on it (classifySelfPath), fetched through selfClient; "" for every
+	// on it (isSelfMediaPath), fetched through selfClient; "" for every
 	// other URL, fetched through the guarded client.
 	self string
 	// fail is the latest upstream failure seen while serving this token
@@ -101,7 +101,7 @@ type relayFailure struct {
 }
 
 // mediaRelay is a loopback-only HTTP proxy that sits between ffmpeg/ffprobe
-// and every remote (non-selfBase) media URL (SEC-4).
+// and every media URL, remote or on selfBase (SEC-4, issue #69).
 //
 // Without it, this process's pre-flight IP validation (validateRemoteURL) is
 // the only SSRF check: ffmpeg/ffprobe are handed the real hostname and do
@@ -121,7 +121,7 @@ type relayFailure struct {
 type mediaRelay struct {
 	client *http.Client
 	// selfClient fetches self entries (relayEntry.self): URLs on the
-	// server's own origin that classifySelfPath admits (issue #65). Its
+	// server's own origin that isSelfMediaPath admits (issue #65). Its
 	// dialer connects only to the host:port of that origin, carried in the
 	// request context (relaySelfAddrKey), and it never follows a redirect:
 	// proxy re-registers the Location instead, so every hop is classified
@@ -295,7 +295,7 @@ func (r *mediaRelay) register(rawURL string) (string, error) {
 
 // registerAs is register for a self entry when self (the server's own
 // origin) is set: the caller has checked that rawURL is a media route on
-// self (classifySelfPath), and the token's fetches go through selfClient.
+// self (isSelfMediaPath), and the token's fetches go through selfClient.
 func (r *mediaRelay) registerAs(rawURL, self string) (string, error) {
 	if err := r.start(); err != nil {
 		return "", err
@@ -1069,7 +1069,7 @@ func relayExtSuffix(rawURL string) string {
 
 // registerNested registers rawURL, a nested playlist entry or redirect
 // target of an entry whose self origin is self. Under a self entry, a URL
-// on that same origin stays a self entry only if classifySelfPath admits it
+// on that same origin stays a self entry only if isSelfMediaPath admits it
 // (ok=false otherwise: refused, never fetched); every other URL, and every
 // URL under a guarded entry, becomes a guarded entry. So the self exception
 // never reaches a path the top-level check would refuse, and a nested
@@ -1078,7 +1078,7 @@ func relayExtSuffix(rawURL string) string {
 func (r *mediaRelay) registerNested(rawURL, self string) (token string, ok bool) {
 	entrySelf := ""
 	if self != "" && isSelfOrigin(rawURL, self) {
-		if selfURLKind(rawURL) == selfPathRefused {
+		if !isSelfMediaURL(rawURL) {
 			return "", false
 		}
 		rawURL, entrySelf = localize(rawURL), self
@@ -1117,14 +1117,16 @@ func copyProxyHeaders(dst, src http.Header) {
 // plus the -protocol_whitelist value to pair with it.
 //
 // mediaURL on selfBase (this server's own origin — see validateRemoteURL's
-// selfBase carve-out) depends on its route (classifySelfPath, issue #65). A
-// route that serves local content is passed through directly: it's already
-// loopback-only and this process is both ends of that request, so relaying
-// it would just add a hop. A route that passes a remote body through
-// (/proxy, /ftp, /yt) is registered as a self entry on globalRelay, so its
-// nested playlist entries and redirects are re-checked like any remote URL.
-// Every other self route is refused. localize has already mapped the https
-// UI origin onto plain http, so the whitelist is "http,tcp" either way.
+// selfBase carve-out) must be a media route (isSelfMediaPath, issue #65) and
+// is registered as a self entry on globalRelay: ffmpeg never fetches it
+// itself. That holds for local content (a torrent or archive file, a local
+// addon file) as much as for the routes that pass a remote body through
+// (/proxy, /ftp, /yt), because either may be an HLS playlist (issue #69),
+// and ffmpeg's HLS demuxer would fetch its entries on its own, past the
+// relay's checks. Through the relay its nested entries and redirects are
+// classified at every hop. Every other self route is refused. localize has
+// already mapped the https UI origin onto plain http, so the whitelist is
+// "http,tcp" either way.
 //
 // Every other (remote, untrusted) mediaURL is routed through globalRelay
 // instead of being handed to ffmpeg/ffprobe directly (SEC-4): the relay is
@@ -1135,17 +1137,14 @@ func copyProxyHeaders(dst, src http.Header) {
 func relayInput(mediaURL, selfBase string) (inputURL, protocolWhitelist string, err error) {
 	localized := localize(mediaURL)
 	if isSelfOrigin(localized, selfBase) {
-		switch selfURLKind(localized) {
-		case selfPathLocal:
-			return localized, "http,tcp", nil
-		case selfPathRelayed:
-			tok, err := globalRelay.registerAs(localized, selfBase)
-			if err != nil {
-				return "", "", fmt.Errorf("media relay: %w", err)
-			}
-			return tok, "http,tcp", nil
+		if err := validateSelfURL(localized); err != nil {
+			return "", "", fmt.Errorf("media relay: %w", err)
 		}
-		return "", "", fmt.Errorf("media relay: %w", validateSelfURL(localized))
+		tok, err := globalRelay.registerAs(localized, selfBase)
+		if err != nil {
+			return "", "", fmt.Errorf("media relay: %w", err)
+		}
+		return tok, "http,tcp", nil
 	}
 	tok, err := globalRelay.register(localized)
 	if err != nil {
