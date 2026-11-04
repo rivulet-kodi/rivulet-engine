@@ -205,6 +205,7 @@ func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 		"RIVULET_HLS_PROBE_TIMEOUT":               "15s",
 		"RIVULET_HLS_SEEK_PREROLL":                "3",
 		"RIVULET_HLS_SEGMENT_CACHE_BYTES":         "536870912",
+		"RIVULET_HLS_RELAY_CACHE_BYTES":           "67108864",
 	}
 	got := hlsConfig(MapLookup(env))
 	want := media.HLSConfig{
@@ -240,6 +241,7 @@ func TestHLSConfigEveryKnobOverridable(t *testing.T) {
 		ProbeTimeout:       15 * time.Second,
 		SeekPreroll:        3 * time.Second,
 		SegmentCacheBytes:  512 << 20,
+		RelayCacheBytes:    64 << 20,
 	}
 	if got != want {
 		t.Errorf("hlsConfig(full env) = %+v,\nwant %+v", got, want)
@@ -284,6 +286,19 @@ func TestEnvTonemap(t *testing.T) {
 				t.Errorf("hlsConfig(...).Tonemap for %q = %q, want %q", c.value, got, c.want)
 			}
 		})
+	}
+}
+
+func TestHLSConfigRelayCacheBytes(t *testing.T) {
+	cases := map[string]int64{"": 0, "0": 0, "33554432": 32 << 20, "-1": 0, "junk": 0}
+	for v, want := range cases {
+		env := map[string]string{}
+		if v != "" {
+			env["RIVULET_HLS_RELAY_CACHE_BYTES"] = v
+		}
+		if got := hlsConfig(MapLookup(env)).RelayCacheBytes; got != want {
+			t.Errorf("RIVULET_HLS_RELAY_CACHE_BYTES=%q: RelayCacheBytes = %d, want %d", v, got, want)
+		}
 	}
 }
 

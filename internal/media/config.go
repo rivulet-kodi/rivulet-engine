@@ -142,6 +142,15 @@ type HLSConfig struct {
 	// and /opensubHash fetches never use it. Cloud-metadata is always
 	// refused.
 	PrivateAllow *netguard.Allow
+
+	// RelayCacheBytes is the memory, across every source, the media relay
+	// may use to keep the byte ranges ffmpeg reads from a remote source on
+	// every segment (the container header and index), so each segment
+	// fetches only its own data from upstream; one range is at most a
+	// quarter of it, and reads being recorded can hold as much again
+	// (RIVULET_HLS_RELAY_CACHE_BYTES). 0, the default, disables the
+	// cache. See relayCache.
+	RelayCacheBytes int64
 }
 
 // defaultPrepareConcurrency keeps preparation to one background transcode at

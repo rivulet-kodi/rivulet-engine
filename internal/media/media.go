@@ -291,6 +291,7 @@ func New(baseURLLocal string, cfg HLSConfig, settings SettingsSource) types.Medi
 	// The relay is process-wide; the most recent New's list applies, which
 	// is the running server's (internal/app builds one prober per Run).
 	globalRelay.setPrivateAllow(cfg.PrivateAllow)
+	globalRelay.setCacheBytes(cfg.RelayCacheBytes)
 	return p
 }
 
