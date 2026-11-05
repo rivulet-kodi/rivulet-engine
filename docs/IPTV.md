@@ -147,7 +147,8 @@ by content, not by name) to get now/next programmes. The model is Stremio's own
   worldwide one if memory matters.
 
   **When a cap drops programmes.** Over 300 programmes for a channel, the
-  channel's later ones in the file are dropped. Over 300 000 programmes in
+  300 closest to now are kept (airing or upcoming ones ahead of past ones),
+  whatever their order in the file; the others are dropped. Over 300 000 programmes in
   total, the channels whose programmes come **later in the file** lose them
   (the earlier channels are kept whole): the file is still read to the end and
   the log reports `guide programmes dropped by the caps` with the number of

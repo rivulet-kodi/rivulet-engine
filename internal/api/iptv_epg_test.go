@@ -717,3 +717,42 @@ func TestIPTVEPGFetch(t *testing.T) {
 		t.Errorf("oversized text node: err = %v; want errIPTVEPGTextRun", err)
 	}
 }
+
+func TestParseXMLTVCapKeepsClosestToNow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Minute)
+	var b strings.Builder
+	b.WriteString(`<tv>`)
+	// Far-past programmes first (over the compaction threshold), the airing
+	// one and the upcoming ones last.
+	n := 3 * iptvEPGMaxPerChannel
+	for i := range n {
+		s := now.Add(-time.Duration(i+2) * time.Minute)
+		b.WriteString(xmltvProg("a", s, s.Add(time.Minute), `<title>past</title>`))
+	}
+	b.WriteString(xmltvProg("a", now.Add(-time.Minute), now.Add(time.Minute), `<title>current</title>`))
+	for i := range 5 {
+		s := now.Add(time.Duration(i+1) * time.Minute)
+		b.WriteString(xmltvProg("a", s, s.Add(time.Minute), `<title>next</title>`))
+	}
+	b.WriteString(`</tv>`)
+	progs, st, err := parseXMLTV(strings.NewReader(b.String()), map[string]struct{}{"a": {}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := progs["a"]
+	if len(ps) != iptvEPGMaxPerChannel || st.DroppedPerChannel != n+6-iptvEPGMaxPerChannel {
+		t.Fatalf("kept %d, dropped %d", len(ps), st.DroppedPerChannel)
+	}
+	cur, nexts := 0, 0
+	for _, p := range ps {
+		switch p.Title {
+		case "current":
+			cur++
+		case "next":
+			nexts++
+		}
+	}
+	if cur != 1 || nexts != 5 {
+		t.Errorf("current kept %d, upcoming kept %d; want 1 and 5", cur, nexts)
+	}
+}
