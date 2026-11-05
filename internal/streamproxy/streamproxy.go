@@ -631,6 +631,14 @@ func (h *Handler) buildProxyURL(extBase, endpoint, dest string, opts *Options) s
 	return h.newProxyURLBuilder(opts).build(extBase, endpoint, dest)
 }
 
+// ProxyURL returns the absolute URL that plays dest through endpoint (e.g.
+// "/proxy/hls/manifest.m3u8") with hdr sent upstream, carrying the proxy
+// password when one is configured. Used by add-ons that hand a player a
+// stream needing request headers it cannot set itself.
+func (h *Handler) ProxyURL(r *http.Request, endpoint, dest string, hdr http.Header) string {
+	return h.buildProxyURL(h.externalBase(r), endpoint, dest, &Options{ReqHeaders: hdr, APIPassword: h.cfg.Password})
+}
+
 // proxyURLBuilder holds the per-request parts of a proxy URL — escaped
 // header overrides, credential and upstream proxy — that are identical for
 // every URL of one rewritten playlist, so they are escaped once instead of

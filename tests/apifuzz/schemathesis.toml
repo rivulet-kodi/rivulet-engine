@@ -94,7 +94,7 @@ expected-statuses = ["2xx", "3xx", "4xx", "504"]
 #
 # * This (main) pass only sees the "nothing there" paths of the stateful routes
 #   (/nzb/*, /{zip,tar,tgz,7zip,rar}/*, /record*, /api/recordings*, /hlsv2/*,
-#   /local-addon/*, /probe): the "stateful" pass of the same script reaches their
+#   /local-addon/*, /iptv/*, /probe): the "stateful" pass of the same script reaches their
 #   success paths against fixtures (stateful.toml, fixtures.py). What neither
 #   pass reaches: /casting/* past its 404 (SSDP discovery is multicast and no
 #   renderer exists offline), /subtitles.{ext} and /opensubHash success (their

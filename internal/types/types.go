@@ -75,6 +75,10 @@ type Config struct {
 	TorznabURL    string // Torznab endpoint base URL; "" disables stream queries
 	TorznabAPIKey string // Optional API key appended as &apikey=; "" = no auth
 
+	// IPTV add-on (/iptv): M3U playlist URLs, one catalog each
+	// (RIVULET_IPTV_PLAYLISTS, comma-separated). Empty disables the add-on.
+	IPTVPlaylists []string
+
 	// Cinemeta-compatible metadata addon base URL used by the /bitmagnet and
 	// /torznab add-ons to resolve an IMDB id to a title (RIVULET_METADATA_URL).
 	// Default https://v3-cinemeta.strem.io; "" disables the lookup. Accepts any

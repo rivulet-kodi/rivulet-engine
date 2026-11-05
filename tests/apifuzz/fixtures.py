@@ -23,6 +23,7 @@ because no packer is available offline; both are listed and read back by the
 engine's own readers, so a malformed one fails the setup, not the fuzz run.
 """
 
+import hashlib
 import http.server
 import json
 import os
@@ -184,6 +185,8 @@ def build(root):
     library = os.path.join(root, "library")
     os.makedirs(library, exist_ok=True)
     shutil.copyfile(os.path.join(root, "clip.mp4"), os.path.join(library, LIBRARY_FILE))
+    with open(os.path.join(root, "iptv.m3u"), "wb") as f:
+        f.write(IPTV_PLAYLIST)
 
 
 class _BytesReader:
@@ -201,6 +204,20 @@ class _BytesReader:
 # lists that hash for the path below.
 LIBRARY_FILE = "Fuzz Clip (2020).mp4"
 LIBRARY_HASH = "99775d46aa43242f"  # sha256("/fixtures/library/Fuzz Clip (2020).mp4")[:8], hex
+
+# The /iptv playlist (RIVULET_IPTV_PLAYLISTS=http://fixtures:8080/iptv.m3u): one
+# channel played directly, one with a Referer (handed out through /proxy). Its
+# ids, "iptv:" + sha256(playlist URL + "\n" + entry URL)[:16] in hex
+# (internal/api/iptv.go parseM3U), are listed in tests/apifuzz/stateful.toml.
+IPTV_PLAYLIST = (
+    b'#EXTM3U\n#EXTINF:-1 group-title="News",Fuzz TS\nclip.ts\n'
+    b'#EXTINF:-1 group-title="Movies",Fuzz MP4\n#EXTVLCOPT:http-referrer=http://fixtures:8080/\nclip.mp4\n'
+)
+
+
+def iptv_id(entry_url):
+    playlist = "http://fixtures:8080/iptv.m3u"
+    return "iptv:" + hashlib.sha256(f"{playlist}\n{entry_url}".encode()).hexdigest()[:32]
 
 
 # --- serve ----------------------------------------------------------------------
@@ -446,6 +463,12 @@ def setup(base, out):
     ids = [m.get("id") for m in catalog.get("metas", [])]
     if ids != [f"local:{LIBRARY_HASH}"]:
         sys.exit(f"setup: the local-files catalog lists {ids}, expected local:{LIBRARY_HASH} (stateful.toml)")
+
+    catalog = json.loads(call(base, "GET", "/iptv/catalog/tv/iptv0.json"))
+    ids = [m.get("id") for m in catalog.get("metas", [])]
+    want = [iptv_id(f"{FIXTURES}/clip.ts"), iptv_id(f"{FIXTURES}/clip.mp4")]
+    if ids != want:
+        sys.exit(f"setup: the IPTV catalog lists {ids}, expected {want} (stateful.toml)")
 
     keep = [start_recording(base, "fuzz-keep")]
     drop = [start_recording(base, f"fuzz-drop-{i}") for i in range(1, 5)]

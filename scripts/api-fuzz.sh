@@ -28,7 +28,7 @@
 #             step creates the sessions and recordings under known keys, and
 #             the Schemathesis config feeds those keys back into the requests, so
 #             the success paths of /{zip,tar,tgz,7zip,rar}/*, /nzb/*, /record*,
-#             /api/recordings*, /hlsv2/*, /local-addon/* and /probe are reached.
+#             /api/recordings*, /hlsv2/*, /local-addon/*, /iptv/* and /probe are reached.
 #             Config: stateful.toml. Skipped when RIVULET_FUZZ_URL is set (the
 #             fixtures need the container network).
 #
@@ -300,6 +300,7 @@ start_stateful() {
 		-e RIVULET_DVR_ENABLED=1 \
 		-e RIVULET_DVR_MAX_ACTIVE=16 \
 		-e LOCAL_FILES_DIR=/fixtures/library \
+		-e RIVULET_IPTV_PLAYLISTS=http://fixtures:8080/iptv.m3u \
 		-e RIVULET_LOCAL_FILES_PUBLIC_URL="$stateful_url" \
 		"$engine_image" >/dev/null
 	wait_up "$stateful_engine"
@@ -317,7 +318,7 @@ if [ "$run_stateful" = 1 ]; then
 	# of the API is the main pass's business.
 	run stateful stateful.toml "$stateful_url" \
 		not_a_server_error,response_schema_conformance,status_code_conformance,foreign_origin_rejected \
-		--include-path-regex '^/(zip|tar|tgz|7zip|rar|nzb|hlsv2|local-addon|\{archiveType\}|api/recordings|record|probe)(/|$)'
+		--include-path-regex '^/(zip|tar|tgz|7zip|rar|nzb|hlsv2|local-addon|iptv|\{archiveType\}|api/recordings|record|probe)(/|$)'
 fi
 
 exit "$status"

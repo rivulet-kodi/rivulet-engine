@@ -288,6 +288,30 @@ func trackersURL(lookup Lookup) string {
 	return strings.TrimSpace(v)
 }
 
+// iptvPlaylists splits RIVULET_IPTV_PLAYLISTS (comma-separated M3U URLs) into
+// the /iptv add-on's playlist list. Unset/empty/off → nil (add-on disabled);
+// only absolute http(s) URLs are kept, anything else is dropped with a warning.
+func iptvPlaylists(lookup Lookup) []string {
+	raw := optionalURL(lookup, "RIVULET_IPTV_PLAYLISTS")
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		u, err := url.Parse(part)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			logging.For("config").Warn("ignoring invalid iptv playlist url", "value", part)
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
 // optionalURL returns the value of key, with ""/off/0/false/no/disable(d)
 // meaning disabled (""). There is no default.
 func optionalURL(lookup Lookup, key string) string {
