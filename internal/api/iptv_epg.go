@@ -25,6 +25,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -494,7 +495,7 @@ func readText(d *xml.Decoder, limit int) (string, error) {
 
 // parseXMLTV streams an XMLTV document and returns, per lower-cased channel
 // id in wanted, the programmes overlapping [now-iptvEPGPast, now+iptvEPGFuture)
-// sorted by start, at most iptvEPGMaxPerChannel each and iptvEPGMaxProgrammes
+// sorted by start, at most iptvEPGMaxPerChannel each (the ones closest to now) and iptvEPGMaxProgrammes
 // in total. Over the total cap the programmes of channels later in the file
 // are dropped (the rest of the file is still read, to count them in stats).
 func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs map[string][]iptvProgramme, st iptvEPGStats, err error) {
@@ -540,9 +541,6 @@ func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs 
 		_, match := wanted[key]
 		take := match && okStart && st0.Before(winEnd) && (!okStop || en.After(winStart))
 		switch {
-		case take && len(progs[key]) >= iptvEPGMaxPerChannel:
-			st.DroppedPerChannel++
-			take = false
 		case take && total >= iptvEPGMaxProgrammes:
 			st.DroppedTotal++
 			if len(progs[key]) == 0 {
@@ -561,12 +559,22 @@ func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs 
 			return nil, st, fmt.Errorf("parse guide: %w", err)
 		}
 		if p, ok := x.programme(st0, en, okStop); ok {
-			progs[key] = append(progs[key], p)
+			ps := append(progs[key], p)
 			total++
+			if len(ps) >= 2*iptvEPGMaxPerChannel {
+				n := len(ps)
+				ps = keepClosest(ps, now)
+				st.DroppedPerChannel += n - len(ps)
+				total -= n - len(ps)
+			}
+			progs[key] = ps
 		}
 	}
 	st.ChannelsEmpty = len(empty)
 	for key, ps := range progs {
+		n := len(ps)
+		ps = keepClosest(ps, now)
+		st.DroppedPerChannel += n - len(ps)
 		if ps = finishProgrammes(ps); len(ps) == 0 {
 			delete(progs, key)
 		} else {
@@ -574,6 +582,40 @@ func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs 
 		}
 	}
 	return progs, st, nil
+}
+
+// keepClosest keeps the iptvEPGMaxPerChannel programmes closest to now, in
+// place: those airing or still to come come first (soonest first), then the
+// past ones (most recent first). Buffers are compacted through it at twice the
+// cap, so a channel never holds more than 2*iptvEPGMaxPerChannel programmes
+// whatever the file order.
+func keepClosest(ps []iptvProgramme, now time.Time) []iptvProgramme {
+	if len(ps) <= iptvEPGMaxPerChannel {
+		return ps
+	}
+	// rank: upcoming (airing or later) sorts before past; then by distance.
+	upcoming := func(p iptvProgramme) bool { return !p.Start.Before(now) || p.End.After(now) }
+	dist := func(p iptvProgramme) time.Duration {
+		if !p.Start.Before(now) {
+			return p.Start.Sub(now)
+		}
+		if p.End.After(now) {
+			return 0
+		}
+		return now.Sub(p.Start)
+	}
+	slices.SortStableFunc(ps, func(a, b iptvProgramme) int {
+		ua, ub := upcoming(a), upcoming(b)
+		if ua != ub {
+			if ua {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(dist(a), dist(b))
+	})
+	clear(ps[iptvEPGMaxPerChannel:])
+	return ps[:iptvEPGMaxPerChannel]
 }
 
 // finishProgrammes sorts by start, drops repeated starts and gives a
