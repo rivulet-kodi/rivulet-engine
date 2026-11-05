@@ -7,12 +7,17 @@
 // Routes:
 //
 //	GET /iptv/manifest.json
-//	     → Stremio addon manifest (id community.rivulet-engine.iptv, v0.1.0),
-//	       one "tv" catalog per playlist with genre/search/skip extras
+//	     → Stremio addon manifest (id community.rivulet-engine.iptv, v0.2.0),
+//	       one "tv" catalog per playlist with genre/search/skip extras; with
+//	       RIVULET_IPTV_EPG also behaviorHints.epgProvider and one guide
+//	       catalog (date/skip extras) per playlist
 //	GET /iptv/catalog/tv/<catalog>[/<extras>].json
-//	     → {metas:[{id,type,name,poster?,genres?}]}, 100 per page
+//	     → {metas:[{id,type,name,poster?,posterShape,genres?,behaviorHints}]},
+//	       100 per page; a guide catalog (iptv<N>-guide) answers
+//	       {metasDetailed:[meta + videos]} for one UTC date
 //	GET /iptv/meta/tv/<id>.json
-//	     → {meta:{id,type,name,poster?,genres?}} (meta null when unknown)
+//	     → {meta:{…preview, behaviorHints:{isLive,hasScheduledVideos}, videos?}}
+//	       (meta null when unknown)
 //	GET /iptv/stream/tv/<id>.json
 //	     → {streams:[{name,title,url}]}
 //
@@ -22,10 +27,16 @@
 // cached for iptvTTL and served stale when a refresh fails. The keys are the
 // fixed configured URLs, so the cache needs no janitor.
 //
-// Channels whose entry carries request headers (#EXTVLCOPT:http-referrer /
-// http-user-agent / http-origin, or Kodi's "url|Header=value&…" suffix) are
-// handed to the player through /proxy, which sends those headers upstream
-// and adds CORS; every other channel URL is returned as-is.
+// Channels whose entry carries request headers (EXTINF http-user-agent /
+// http-referrer / http-origin attributes, #EXTVLCOPT:http-referrer /
+// http-user-agent / http-origin, or Kodi's "url|Header=value&…" suffix; the
+// later, more specific forms win) are handed to the player through /proxy,
+// which sends those headers upstream and adds CORS; every other channel URL
+// is returned as-is.
+//
+// The live-TV model (isLive previews, epgProvider guide catalogs, programme
+// videos) follows stremio-core 0.66.0; the XMLTV guide itself is in
+// iptv_epg.go.
 package api
 
 import (
@@ -36,6 +47,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -57,6 +69,8 @@ const (
 	iptvMaxChannels  = 20000
 	iptvMaxGenres    = 200
 	iptvPageSize     = 100
+	iptvMetaPast     = 2 * time.Hour  // meta videos: programmes from now-2h …
+	iptvMetaFuture   = 24 * time.Hour // … to now+24h
 )
 
 var iptvClient = &http.Client{Timeout: iptvFetchTimeout}
@@ -67,6 +81,8 @@ type iptvChannel struct {
 	Name    string
 	Logo    string
 	URL     string
+	TVGID   string  // EPG key (tvg-id), trimmed; "" when the entry has none
+	Chno    float64 // tvg-chno; 0 when absent or not a positive number
 	Groups  []string
 	Headers http.Header // request headers the upstream needs; nil when none
 }
@@ -77,6 +93,7 @@ type iptvPlaylist struct {
 	channels []iptvChannel
 	byID     map[string]int
 	genres   []string
+	tvgSig   string    // fingerprint of the channels' tvg-ids, see iptvTVGSig
 	fetched  time.Time // last successful fetch
 	failed   time.Time // last failed fetch
 }
@@ -120,6 +137,7 @@ func iptvList(ctx context.Context, u string) *iptvPlaylist {
 			}
 		}
 	}
+	pl.tvgSig = iptvTVGSig(chs)
 	pl.genres = make([]string, 0, len(seen))
 	for g := range seen {
 		pl.genres = append(pl.genres, g)
@@ -139,6 +157,14 @@ func (pl *iptvPlaylist) snapshot() ([]iptvChannel, map[string]int, []string) {
 	return pl.channels, pl.byID, pl.genres
 }
 
+// guideInput returns the channels and the tvg-id fingerprint the XMLTV loader
+// filters programmes by.
+func (pl *iptvPlaylist) guideInput() ([]iptvChannel, string) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	return pl.channels, pl.tvgSig
+}
+
 // redactURL drops userinfo and query (which may carry credentials) for logs.
 func redactURL(raw string) string {
 	u, err := url.Parse(raw)
@@ -151,24 +177,35 @@ func redactURL(raw string) string {
 func iptvFetch(ctx context.Context, u string) ([]iptvChannel, error) {
 	ctx, cancel := context.WithTimeout(ctx, iptvFetchTimeout)
 	defer cancel()
+	resp, err := iptvGet(ctx, iptvClient, u, "playlist")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return parseM3U(io.LimitReader(resp.Body, iptvMaxBytes), u)
+}
+
+// iptvGet issues a GET and returns the 200 response; what names the resource
+// in errors. The caller closes the body.
+func iptvGet(ctx context.Context, c *http.Client, u, what string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
-	resp, err := iptvClient.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			// *url.Error embeds the full URL, which may carry credentials.
-			return nil, fmt.Errorf("%s playlist: %w", ue.Op, ue.Err)
+			return nil, fmt.Errorf("%s %s: %w", ue.Op, what, ue.Err)
 		}
 		return nil, fmt.Errorf("do request: %w", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return parseM3U(io.LimitReader(resp.Body, iptvMaxBytes), u)
+	return resp, nil
 }
 
 // ---- M3U parsing -----------------------------------------------------------
@@ -217,11 +254,23 @@ func parseM3U(rd io.Reader, base string) ([]iptvChannel, error) {
 				switch strings.ToLower(m[1]) {
 				case "tvg-logo":
 					cur.Logo = strings.TrimSpace(m[2])
+				case "tvg-id":
+					cur.TVGID = strings.TrimSpace(m[2])
+				case "tvg-chno":
+					if n, err := strconv.ParseFloat(strings.TrimSpace(m[2]), 64); err == nil && n > 0 && !math.IsInf(n, 0) {
+						cur.Chno = n
+					}
 				case "group-title":
 					cur.Groups = splitGroups(m[2])
 				case "tvg-name":
 					if name == "" {
 						name = m[2]
+					}
+				default:
+					// http-user-agent / http-referrer / http-origin; the
+					// #EXTVLCOPT lines and "|Header=" suffix below overwrite.
+					if h := iptvVLCHeaders[strings.ToLower(m[1])]; h != "" {
+						cur.setHeader(h, m[2])
 					}
 				}
 			}
@@ -230,11 +279,8 @@ func parseM3U(rd io.Reader, base string) ([]iptvChannel, error) {
 			extgrp = line[len("#EXTGRP:"):]
 		case strings.HasPrefix(line, "#EXTVLCOPT:"):
 			k, v, ok := strings.Cut(line[len("#EXTVLCOPT:"):], "=")
-			if h := iptvVLCHeaders[strings.ToLower(strings.TrimSpace(k))]; ok && h != "" && v != "" {
-				if cur.Headers == nil {
-					cur.Headers = http.Header{}
-				}
-				cur.Headers.Set(h, strings.TrimSpace(v))
+			if h := iptvVLCHeaders[strings.ToLower(strings.TrimSpace(k))]; ok && h != "" {
+				cur.setHeader(h, v)
 			}
 		case strings.HasPrefix(line, "#"):
 		default:
@@ -267,14 +313,39 @@ func parseM3U(rd io.Reader, base string) ([]iptvChannel, error) {
 			seen[ch.ID] = struct{}{}
 			out = append(out, ch)
 			if len(out) >= iptvMaxChannels {
-				return out, nil
+				return sortByChno(out), nil
 			}
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("read playlist: %w", err)
 	}
-	return out, nil
+	return sortByChno(out), nil
+}
+
+// setHeader sets a request header the upstream needs; empty values are ignored.
+func (c *iptvChannel) setHeader(name, value string) {
+	if value = strings.TrimSpace(value); value == "" {
+		return
+	}
+	if c.Headers == nil {
+		c.Headers = http.Header{}
+	}
+	c.Headers.Set(name, value)
+}
+
+// sortByChno orders numbered channels (tvg-chno) first, ascending, then the
+// rest in playlist order; the sort is stable, so a playlist without numbers
+// keeps its order.
+func sortByChno(chs []iptvChannel) []iptvChannel {
+	sort.SliceStable(chs, func(i, j int) bool {
+		a, b := chs[i].Chno, chs[j].Chno
+		if a == 0 || b == 0 {
+			return a != 0 && b == 0
+		}
+		return a < b
+	})
+	return chs
 }
 
 // splitExtinf splits the text after "#EXTINF:" at the first comma outside
@@ -357,6 +428,10 @@ func (s *server) handleIPTV(w http.ResponseWriter, r *http.Request, seg []string
 func iptvCtx(r *http.Request) context.Context { return context.WithoutCancel(r.Context()) }
 
 func (s *server) iptvManifest(w http.ResponseWriter, r *http.Request) {
+	guide := len(s.cfg.IPTVEPG) > 0
+	if guide {
+		s.iptvGuide(r, false) // start the guide load now; the catalogs wait for it
+	}
 	catalogs := make([]any, 0, len(s.cfg.IPTVPlaylists))
 	for i, u := range s.cfg.IPTVPlaylists {
 		_, _, genres := iptvList(iptvCtx(r), u).snapshot()
@@ -374,24 +449,49 @@ func (s *server) iptvManifest(w http.ResponseWriter, r *http.Request) {
 			"name":  name,
 			"extra": []any{genre, map[string]any{"name": "search"}, map[string]any{"name": "skip"}},
 		})
+		if guide {
+			// stremio-core (Manifest catalog is_epg_guide): a catalog with a
+			// `date` extra on an epgProvider add-on is a guide catalog.
+			catalogs = append(catalogs, map[string]any{
+				"type":  "tv",
+				"id":    "iptv" + strconv.Itoa(i) + iptvGuideSuffix,
+				"name":  name + " guide",
+				"extra": []any{map[string]any{"name": "date"}, map[string]any{"name": "skip"}},
+			})
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	m := map[string]any{
 		"id":          "community.rivulet-engine.iptv",
-		"version":     "0.1.0",
+		"version":     "0.2.0",
 		"name":        "IPTV",
 		"description": "Live TV channels from M3U playlists.",
 		"resources":   []string{"catalog", "meta", "stream"},
 		"types":       []string{"tv"},
 		"idPrefixes":  []string{"iptv:"},
 		"catalogs":    catalogs,
-	})
+	}
+	if guide {
+		m["behaviorHints"] = map[string]any{"epgProvider": true}
+	}
+	writeJSON(w, http.StatusOK, m)
 }
 
+// iptvGuideSuffix marks a guide catalog id ("iptv0-guide").
+const iptvGuideSuffix = "-guide"
+
+// iptvMetaPreview is a channel as listed in a catalog. stremio-core treats
+// behaviorHints.isLive (or type "tv") as a live item; channel logos are
+// square.
 func iptvMetaPreview(c *iptvChannel) map[string]any {
-	m := map[string]any{"id": c.ID, "type": "tv", "name": c.Name}
+	m := map[string]any{
+		"id":            c.ID,
+		"type":          "tv",
+		"name":          c.Name,
+		"posterShape":   "square",
+		"behaviorHints": map[string]any{"isLive": true},
+	}
 	if c.Logo != "" {
 		m["poster"] = c.Logo
-		m["posterShape"] = "square"
 		m["logo"] = c.Logo
 	}
 	if len(c.Groups) > 0 {
@@ -416,20 +516,38 @@ func iptvExtras(r *http.Request) url.Values {
 	return extras
 }
 
+// iptvCatalogID parses a catalog id: "iptv<N>" (channels) or "iptv<N>-guide".
+func (s *server) iptvCatalogID(typ, id string) (idx int, guide, ok bool) {
+	rest, ok := strings.CutPrefix(id, "iptv")
+	if !ok || typ != "tv" {
+		return 0, false, false
+	}
+	rest, guide = strings.CutSuffix(rest, iptvGuideSuffix)
+	idx, err := strconv.Atoi(rest)
+	if err != nil || idx < 0 || idx >= len(s.cfg.IPTVPlaylists) {
+		return 0, false, false
+	}
+	return idx, guide, true
+}
+
 func (s *server) iptvCatalog(w http.ResponseWriter, r *http.Request, typ, id string) {
-	metas := []any{}
-	idx, err := strconv.Atoi(strings.TrimPrefix(id, "iptv"))
-	if typ != "tv" || !strings.HasPrefix(id, "iptv") || err != nil || idx < 0 || idx >= len(s.cfg.IPTVPlaylists) {
-		writeJSON(w, http.StatusOK, map[string]any{"metas": metas})
+	idx, guide, ok := s.iptvCatalogID(typ, id)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"metas": []any{}})
 		return
 	}
 	extras := iptvExtras(r)
-	genre := extras.Get("genre")
-	search := strings.ToLower(strings.TrimSpace(extras.Get("search")))
 	skip, _ := strconv.Atoi(extras.Get("skip"))
 	skip = max(skip, 0)
-
 	chs, _, _ := iptvList(iptvCtx(r), s.cfg.IPTVPlaylists[idx]).snapshot()
+	if guide {
+		s.iptvGuideCatalog(w, r, chs, extras.Get("date"), skip)
+		return
+	}
+	genre := extras.Get("genre")
+	search := strings.ToLower(strings.TrimSpace(extras.Get("search")))
+
+	metas := []any{}
 	matched := 0
 	for i := range chs {
 		c := &chs[i]
@@ -449,6 +567,51 @@ func (s *server) iptvCatalog(w http.ResponseWriter, r *http.Request, typ, id str
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"metas": metas})
+}
+
+// iptvGuideCatalog answers a guide catalog request (stremio-core
+// live_tv_guide.rs): {"metasDetailed": [...]}, one full channel meta per
+// channel with the programmes overlapping the UTC date. Channels without
+// programmes that day are still listed (empty videos). A missing or invalid
+// date means today (UTC). Without a configured guide the catalog is empty.
+func (s *server) iptvGuideCatalog(w http.ResponseWriter, r *http.Request, chs []iptvChannel, date string, skip int) {
+	metas := []any{}
+	if len(s.cfg.IPTVEPG) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"metasDetailed": metas})
+		return
+	}
+	day, err := time.Parse(time.DateOnly, date)
+	if err != nil {
+		day = time.Now().UTC().Truncate(24 * time.Hour)
+	}
+	from, to := day, day.Add(24*time.Hour)
+	g := s.iptvGuide(r, true)
+	for i := skip; i < len(chs) && len(metas) < iptvPageSize; i++ {
+		metas = append(metas, iptvMetaDetailed(&chs[i], g, from, to))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"metasDetailed": metas})
+}
+
+// iptvMetaDetailed is a channel meta whose videos are its programmes
+// overlapping [from, to) (stremio-core: schedule = the meta's videos;
+// hasScheduledVideos marks a channel with one). videos is omitted when no
+// guide is configured.
+func iptvMetaDetailed(c *iptvChannel, g iptvGuide, from, to time.Time) map[string]any {
+	m := iptvMetaPreview(c)
+	hints := map[string]any{"isLive": true, "hasScheduledVideos": false}
+	m["behaviorHints"] = hints
+	if !g.enabled {
+		return m
+	}
+	videos := []any{}
+	for _, p := range g.programmes(c) {
+		if p.End.After(from) && p.Start.Before(to) {
+			videos = append(videos, p.video(c.ID))
+		}
+	}
+	hints["hasScheduledVideos"] = len(videos) > 0
+	m["videos"] = videos
+	return m
 }
 
 func containsString(list []string, s string) bool {
@@ -480,7 +643,9 @@ func (s *server) iptvMeta(w http.ResponseWriter, r *http.Request, typ, id string
 		writeJSON(w, http.StatusOK, map[string]any{"meta": nil})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"meta": iptvMetaPreview(&c)})
+	now := time.Now()
+	g := s.iptvGuide(r, true)
+	writeJSON(w, http.StatusOK, map[string]any{"meta": iptvMetaDetailed(&c, g, now.Add(-iptvMetaPast), now.Add(iptvMetaFuture))})
 }
 
 func (s *server) iptvStream(w http.ResponseWriter, r *http.Request, typ, id string) {

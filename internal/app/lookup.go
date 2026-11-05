@@ -288,11 +288,12 @@ func trackersURL(lookup Lookup) string {
 	return strings.TrimSpace(v)
 }
 
-// iptvPlaylists splits RIVULET_IPTV_PLAYLISTS (comma-separated M3U URLs) into
-// the /iptv add-on's playlist list. Unset/empty/off → nil (add-on disabled);
-// only absolute http(s) URLs are kept, anything else is dropped with a warning.
-func iptvPlaylists(lookup Lookup) []string {
-	raw := optionalURL(lookup, "RIVULET_IPTV_PLAYLISTS")
+// iptvURLList splits a comma-separated URL list env var (RIVULET_IPTV_PLAYLISTS
+// M3U playlists, RIVULET_IPTV_EPG XMLTV guides) for the /iptv add-on.
+// Unset/empty/off → nil (disabled); only absolute http(s) URLs are kept,
+// anything else is dropped with a warning naming what (e.g. "iptv playlist").
+func iptvURLList(lookup Lookup, key, what string) []string {
+	raw := optionalURL(lookup, key)
 	if raw == "" {
 		return nil
 	}
@@ -304,7 +305,7 @@ func iptvPlaylists(lookup Lookup) []string {
 		}
 		u, err := url.Parse(part)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			logging.For("config").Warn("ignoring invalid iptv playlist url", "value", part)
+			logging.For("config").Warn("ignoring invalid "+what+" url", "value", part)
 			continue
 		}
 		out = append(out, part)

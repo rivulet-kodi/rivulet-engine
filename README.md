@@ -58,7 +58,8 @@ expect, so you point a client at it and it just works.
 - **Self-hosted indexers** — [Bitmagnet](docs/BITMAGNET.md) and
   [Torznab](docs/TORZNAB.md) add-ons built in.
 - **Live TV** — opt-in [IPTV](docs/IPTV.md) add-on for M3U playlists
-  (e.g. [Free-TV](https://github.com/Free-TV/IPTV)).
+  (e.g. [Free-TV](https://github.com/Free-TV/IPTV)) with an optional XMLTV
+  programme guide (now/next in Stremio's live-TV model).
 
 The full list, with routes and behaviours, is in [docs/FEATURES.md](docs/FEATURES.md).
 
@@ -123,7 +124,7 @@ and env file live in [`deploy/systemd`](deploy/systemd).
 | [HTTPS](docs/HTTPS.md) | Browser-trusted certificate for the Stremio web UI |
 | [Container](docs/CONTAINER.md) | Podman, Docker, HuggingFace Spaces |
 | [Bitmagnet](docs/BITMAGNET.md) · [Torznab](docs/TORZNAB.md) | Indexer add-ons |
-| [IPTV](docs/IPTV.md) | M3U playlist add-on |
+| [IPTV](docs/IPTV.md) | M3U playlist add-on + XMLTV guide |
 | [Platforms](docs/PLATFORMS.md) | Build targets, Android, library mode |
 | [Architecture](docs/ARCHITECTURE.md) | Package layout |
 | [API reference](internal/api/openapi.json) | OpenAPI 3.1 spec (also `GET /openapi.json`; interactive page at `/api/reference`) |

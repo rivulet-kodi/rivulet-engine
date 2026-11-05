@@ -23,6 +23,8 @@ because no packer is available offline; both are listed and read back by the
 engine's own readers, so a malformed one fails the setup, not the fuzz run.
 """
 
+import datetime
+import gzip
 import hashlib
 import http.server
 import json
@@ -187,6 +189,8 @@ def build(root):
     shutil.copyfile(os.path.join(root, "clip.mp4"), os.path.join(library, LIBRARY_FILE))
     with open(os.path.join(root, "iptv.m3u"), "wb") as f:
         f.write(IPTV_PLAYLIST)
+    with open(os.path.join(root, "iptv-epg.xml.gz"), "wb") as f:
+        f.write(iptv_guide())
 
 
 class _BytesReader:
@@ -209,10 +213,29 @@ LIBRARY_HASH = "99775d46aa43242f"  # sha256("/fixtures/library/Fuzz Clip (2020).
 # channel played directly, one with a Referer (handed out through /proxy). Its
 # ids, "iptv:" + sha256(playlist URL + "\n" + entry URL)[:16] in hex
 # (internal/api/iptv.go parseM3U), are listed in tests/apifuzz/stateful.toml.
+# Both carry a tvg-id the guide below (RIVULET_IPTV_EPG) has programmes for.
 IPTV_PLAYLIST = (
-    b'#EXTM3U\n#EXTINF:-1 group-title="News",Fuzz TS\nclip.ts\n'
-    b'#EXTINF:-1 group-title="Movies",Fuzz MP4\n#EXTVLCOPT:http-referrer=http://fixtures:8080/\nclip.mp4\n'
+    b'#EXTM3U\n#EXTINF:-1 tvg-id="fuzz.ts" tvg-chno="2" group-title="News",Fuzz TS\nclip.ts\n'
+    b'#EXTINF:-1 tvg-id="FUZZ.mp4" tvg-chno="1" group-title="Movies",Fuzz MP4\n#EXTVLCOPT:http-referrer=http://fixtures:8080/\nclip.mp4\n'
 )
+
+
+def iptv_guide():
+    """A gzip XMLTV (RIVULET_IPTV_EPG=http://fixtures:8080/iptv-epg.xml.gz) with
+    a few programmes around the build time for each playlist channel."""
+    now = datetime.datetime.now(datetime.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    fmt = "%Y%m%d%H%M%S +0000"
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>\n<tv>']
+    for channel in ("fuzz.ts", "fuzz.mp4"):
+        for i in range(-2, 30, 2):
+            start = now + datetime.timedelta(hours=i)
+            xml.append(
+                f'<programme start="{start.strftime(fmt)}" stop="{(start + datetime.timedelta(hours=2)).strftime(fmt)}" '
+                f'channel="{channel}"><title>Show {i}</title><sub-title>Part</sub-title><desc>Fuzz &amp; co</desc>'
+                f'<category>News</category><episode-num system="xmltv_ns">0.{i % 5}.</episode-num></programme>'
+            )
+    xml.append("</tv>\n")
+    return gzip.compress("".join(xml).encode())
 
 
 def iptv_id(entry_url):
@@ -466,15 +489,32 @@ def setup(base, out):
 
     catalog = json.loads(call(base, "GET", "/iptv/catalog/tv/iptv0.json"))
     ids = [m.get("id") for m in catalog.get("metas", [])]
-    want = [iptv_id(f"{FIXTURES}/clip.ts"), iptv_id(f"{FIXTURES}/clip.mp4")]
+    # tvg-chno sorts numbered channels first: clip.mp4 (chno 1) before clip.ts (chno 2).
+    want = [iptv_id(f"{FIXTURES}/clip.mp4"), iptv_id(f"{FIXTURES}/clip.ts")]
     if ids != want:
         sys.exit(f"setup: the IPTV catalog lists {ids}, expected {want} (stateful.toml)")
+
+    # The guide loads in the background (a request waits ~2 s for the first load):
+    # make sure it is in before fuzzing, so the guide catalog and meta have programmes.
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    for _ in range(10):
+        guide = json.loads(call(base, "GET", f"/iptv/catalog/tv/iptv0-guide/date={today}.json"))
+        if all(m.get("videos") for m in guide.get("metasDetailed", [])) and guide.get("metasDetailed"):
+            break
+        time.sleep(1)
+    else:
+        sys.exit(f"setup: the IPTV guide catalog has no programmes: {guide!r}")
+    day = datetime.timedelta(days=1)
+    stateful = os.path.join(out, "stateful")
+    os.makedirs(stateful, exist_ok=True)
+    write_dictionary(
+        os.path.join(stateful, "iptv-extras.dict"),
+        ["genre=News.json", "search=fuzz&skip=1.json", f"date={today}.json", f"date={today + day}&skip=1.json", "date=2000-01-01.json", "date=nonsense.json"],
+    )
 
     keep = [start_recording(base, "fuzz-keep")]
     drop = [start_recording(base, f"fuzz-drop-{i}") for i in range(1, 5)]
     live = [start_live_recording(base, f"fuzz-live-{i}") for i in range(1, 5)]
-    stateful = os.path.join(out, "stateful")
-    os.makedirs(stateful, exist_ok=True)
     write_dictionary(os.path.join(stateful, "recordings-keep.dict"), keep)
     write_dictionary(os.path.join(stateful, "recordings-drop.dict"), drop)
     write_dictionary(os.path.join(stateful, "recordings-live.dict"), live)

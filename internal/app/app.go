@@ -155,14 +155,15 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		BitmagnetURL:        getenv(lookup, "RIVULET_BITMAGNET_URL", ""),
 		TorznabURL:          getenv(lookup, "RIVULET_TORZNAB_URL", ""),
 		TorznabAPIKey:       getenv(lookup, "RIVULET_TORZNAB_APIKEY", ""),
-		IPTVPlaylists:       iptvPlaylists(lookup),                               // M3U playlists for the /iptv add-on; "" / off disables (RIVULET_IPTV_PLAYLISTS)
-		MetadataURL:         metadataURL(lookup),                                 // Cinemeta-compatible meta addon base; "" disables (RIVULET_METADATA_URL)
-		DisableTrackers:     envBool(lookup, "RIVULET_DISABLE_TRACKERS", false),  // disable all tracker announces (DHT/PEX/webseeds still used); accepts 1/true/0/false
-		DisableWebtorrent:   envBool(lookup, "RIVULET_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
-		EnableDLNA:          envBool(lookup, "RIVULET_ENABLE_DLNA", false),       // default disabled; set =1/true to enable /casting DLNA discovery + control
-		PeersPerTorrent:     envInt(lookup, "RIVULET_PEERS_PER_TORRENT", 0),      // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
-		TrackersURL:         trackersURL(lookup),                                 // remote tracker list; "" disables remote fetch (RIVULET_TRACKERS_URL)
-		LocalIMDB:           envBool(lookup, "RIVULET_LOCAL_IMDB", true),         // local-files addon IMDB resolution; default on
+		IPTVPlaylists:       iptvURLList(lookup, "RIVULET_IPTV_PLAYLISTS", "iptv playlist"), // M3U playlists for the /iptv add-on; "" / off disables (RIVULET_IPTV_PLAYLISTS)
+		IPTVEPG:             iptvURLList(lookup, "RIVULET_IPTV_EPG", "iptv guide"),          // XMLTV guides for the /iptv add-on; "" / off disables (RIVULET_IPTV_EPG)
+		MetadataURL:         metadataURL(lookup),                                            // Cinemeta-compatible meta addon base; "" disables (RIVULET_METADATA_URL)
+		DisableTrackers:     envBool(lookup, "RIVULET_DISABLE_TRACKERS", false),             // disable all tracker announces (DHT/PEX/webseeds still used); accepts 1/true/0/false
+		DisableWebtorrent:   envBool(lookup, "RIVULET_DISABLE_WEBTORRENT", true),            // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers
+		EnableDLNA:          envBool(lookup, "RIVULET_ENABLE_DLNA", false),                  // default disabled; set =1/true to enable /casting DLNA discovery + control
+		PeersPerTorrent:     envInt(lookup, "RIVULET_PEERS_PER_TORRENT", 0),                 // 0 = default 50/25/500; lower (e.g. 30) trims peer goroutines & RAM
+		TrackersURL:         trackersURL(lookup),                                            // remote tracker list; "" disables remote fetch (RIVULET_TRACKERS_URL)
+		LocalIMDB:           envBool(lookup, "RIVULET_LOCAL_IMDB", true),                    // local-files addon IMDB resolution; default on
 		LocalFilesPublicURL: localFilesPublicURL,
 		BTEncryption:        getenv(lookup, "RIVULET_BT_ENCRYPTION", "prefer"),
 		BTProxy:             getenv(lookup, "RIVULET_BT_PROXY", ""),
