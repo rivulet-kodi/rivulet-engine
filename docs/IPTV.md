@@ -119,22 +119,44 @@ by content, not by name) to get now/next programmes. The model is Stremio's own
   than about 2 seconds for the *first* load and otherwise answers without
   programmes; later requests see them. The guide load starts when the manifest
   is fetched.
-- **Limits** (memory is bounded by these, not by the guide's size):
+- **Limits.** Memory is bounded by these, not by the guide's size:
 
   | Limit | Value |
   |---|---|
   | gzip download | 64 MiB |
   | decoded XML (and a plain download) | 512 MiB |
+  | one text node or tag (the bytes between two `<`) | 256 KiB |
   | programmes kept per channel | 300 (the first in the guide, then sorted by start) |
-  | programmes kept in total | 300 000 (parsing stops there) |
-  | title / description | 200 / 1000 bytes |
+  | programmes kept in total | 300 000 |
+  | title / sub-title / description / icon URL | 200 / 200 / 1000 / 500 bytes |
   | categories per programme | 8 × 60 bytes |
   | load timeout | 3 min |
 
-  A guide over a size cap fails to load (logged) and the previous data, if any,
-  stays. Guides in ISO-8859-1 are read; other non-UTF-8 charsets are rejected.
-  With several guide URLs, programmes of a channel are merged (the first guide
-  wins on equal start times).
+  A guide over a size cap, or with a text node or tag over 256 KiB (the XML
+  decoder buffers each one whole, so this is what bounds it), fails to load
+  (logged) and the previous data, if any, stays. Per programme only the first
+  title, sub-title, description and icon, up to 8 categories and the first
+  episode number of each kind are read, however many the guide has.
+
+  **Peak memory.** While loading, the decoder holds one token (at most 256 KiB)
+  at a time; what stays resident is the kept programmes: roughly 0.7 KB each
+  for a typical guide (the Italian EPG's 5 162 matching programmes ran at 46 MiB total RSS), and at most
+  about 3 KB each if every text field is at its cap, so the 300 000-programme
+  limit is a theoretical ceiling of ~0.9 GB and ~0.2 GB for typical content.
+  Point `RIVULET_IPTV_EPG` at a guide for the channels you use rather than a
+  worldwide one if memory matters.
+
+  **When a cap drops programmes.** Over 300 programmes for a channel, the
+  channel's later ones in the file are dropped. Over 300 000 programmes in
+  total, the channels whose programmes come **later in the file** lose them
+  (the earlier channels are kept whole): the file is still read to the end and
+  the log reports `guide programmes dropped by the caps` with the number of
+  programmes dropped and of channels left without any. Use a smaller guide, or
+  one that lists only your channels, if that happens.
+
+  Guides in ISO-8859-1 or Windows-1252 are read; other non-UTF-8 charsets are
+  rejected. With several guide URLs, programmes of a channel are merged (the
+  first guide wins on equal start times).
 
 ---
 

@@ -489,7 +489,8 @@ def setup(base, out):
 
     catalog = json.loads(call(base, "GET", "/iptv/catalog/tv/iptv0.json"))
     ids = [m.get("id") for m in catalog.get("metas", [])]
-    want = [iptv_id(f"{FIXTURES}/clip.ts"), iptv_id(f"{FIXTURES}/clip.mp4")]
+    # tvg-chno sorts numbered channels first: clip.mp4 (chno 1) before clip.ts (chno 2).
+    want = [iptv_id(f"{FIXTURES}/clip.mp4"), iptv_id(f"{FIXTURES}/clip.ts")]
     if ids != want:
         sys.exit(f"setup: the IPTV catalog lists {ids}, expected {want} (stateful.toml)")
 

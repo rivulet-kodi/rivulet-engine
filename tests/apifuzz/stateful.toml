@@ -121,7 +121,8 @@ values = ["local:99775d46aa43242f", "local:99775d46aa43242f.json"]
 [dictionaries.local-types]
 values = ["movie", "other"]
 
-# Channel ids of tests/apifuzz/fixtures.py IPTV_PLAYLIST (clip.ts, then clip.mp4).
+# Channel ids of tests/apifuzz/fixtures.py IPTV_PLAYLIST (clip.ts, then clip.mp4; the
+# catalog lists them the other way round, ordered by tvg-chno).
 [dictionaries.iptv-ids]
 values = ["iptv:a1d0e550ed549ef3fa1497277a39529f", "iptv:c55c5e7abd7f3dd6b1fee8ac08081850.json"]
 

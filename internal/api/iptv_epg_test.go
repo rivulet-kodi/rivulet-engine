@@ -9,6 +9,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -96,9 +97,9 @@ func TestParseXMLTV(t *testing.T) {
 	b.WriteString(`<programme start="` + now.Add(4*h).Format("20060102150405") + `" channel="a.it"><title>Last, no stop</title></programme>`)
 	b.WriteString(`</tv>`)
 
-	progs, trunc, err := parseXMLTV(strings.NewReader(b.String()), map[string]struct{}{"a.it": {}}, now)
-	if err != nil || trunc {
-		t.Fatalf("err=%v truncated=%v", err, trunc)
+	progs, st, err := parseXMLTV(strings.NewReader(b.String()), map[string]struct{}{"a.it": {}}, now)
+	if err != nil || st != (iptvEPGStats{}) {
+		t.Fatalf("err=%v stats=%+v", err, st)
 	}
 	if len(progs) != 1 {
 		t.Fatalf("channels = %v; want only a.it", progs)
@@ -133,12 +134,12 @@ func TestParseXMLTVCaps(t *testing.T) {
 		b.WriteString(xmltvProg("a", s, s.Add(time.Minute), `<title>`+strings.Repeat("x", 5000)+`</title><desc>`+strings.Repeat("é", 5000)+`</desc>`))
 	}
 	b.WriteString(`</tv>`)
-	progs, _, err := parseXMLTV(strings.NewReader(b.String()), map[string]struct{}{"a": {}}, now)
+	progs, st, err := parseXMLTV(strings.NewReader(b.String()), map[string]struct{}{"a": {}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(progs["a"]); got != iptvEPGMaxPerChannel {
-		t.Errorf("kept %d programmes; want the per-channel cap %d", got, iptvEPGMaxPerChannel)
+	if got := len(progs["a"]); got != iptvEPGMaxPerChannel || st.DroppedPerChannel != 10 {
+		t.Errorf("kept %d programmes, dropped %d; want the per-channel cap %d and 10 dropped", got, st.DroppedPerChannel, iptvEPGMaxPerChannel)
 	}
 	p := progs["a"][0]
 	if len(p.Title) != iptvEPGMaxTitle || len(p.Desc) > iptvEPGMaxDesc || strings.ContainsRune(p.Desc, '\uFFFD') {
@@ -153,6 +154,13 @@ func TestParseXMLTVLatin1(t *testing.T) {
 	progs, _, err := parseXMLTV(bytes.NewReader(doc), map[string]struct{}{"a": {}}, now)
 	if err != nil || len(progs["a"]) != 1 || progs["a"][0].Title != "Caffè über" {
 		t.Fatalf("progs = %+v, err = %v", progs, err)
+	}
+	// windows-1252 maps 0x80-0x9F to punctuation (€ “ ” …), ISO-8859-1 to C1 controls.
+	doc = []byte(`<?xml version="1.0" encoding="windows-1252"?><tv>` +
+		xmltvProg("a", now, now.Add(time.Hour), "<title>\x80 \x93Hi\x94 \x85 caff\xe8</title>") + `</tv>`)
+	progs, _, err = parseXMLTV(bytes.NewReader(doc), map[string]struct{}{"a": {}}, now)
+	if err != nil || len(progs["a"]) != 1 || progs["a"][0].Title != "€ “Hi” … caffè" {
+		t.Fatalf("cp1252 progs = %+v, err = %v", progs, err)
 	}
 	_, _, err = parseXMLTV(strings.NewReader(`<?xml version="1.0" encoding="EBCDIC"?><tv/>`), map[string]struct{}{"a": {}}, now)
 	if err == nil {
@@ -524,5 +532,188 @@ func TestIPTVGuideMerge(t *testing.T) {
 	}
 	if g.programmes(&iptvChannel{}) != nil {
 		t.Error("a channel without tvg-id has programmes")
+	}
+}
+
+func TestIPTVTVGSig(t *testing.T) {
+	ch := func(ids ...string) []iptvChannel {
+		var out []iptvChannel
+		for _, id := range ids {
+			out = append(out, iptvChannel{TVGID: id})
+		}
+		return out
+	}
+	base := iptvTVGSig(ch("a", "b", "c"))
+	for name, same := range map[string][]iptvChannel{
+		"order":         ch("c", "a", "b"),
+		"case, padding": ch(" A", "B ", "c"),
+		"duplicates":    ch("a", "b", "b", "c", "c", "c"),
+		"no id":         append(ch("a", "b", "c"), iptvChannel{}),
+	} {
+		if got := iptvTVGSig(same); got != base {
+			t.Errorf("%s changed the signature: %s vs %s", name, got, base)
+		}
+	}
+	for name, other := range map[string][]iptvChannel{
+		"swapped id":      ch("a", "b", "d"),
+		"extra id":        ch("a", "b", "c", "d"),
+		"dup then swap":   ch("a", "a", "b", "b", "d"), // equal-hash XOR cancellation must not hide this
+		"missing channel": ch("a", "b"),
+	} {
+		if iptvTVGSig(other) == base {
+			t.Errorf("%s left the signature unchanged", name)
+		}
+	}
+}
+
+func TestIPTVRunReader(t *testing.T) {
+	read := func(s string, max int) error {
+		_, err := io.Copy(io.Discard, &iptvRunReader{r: iotestOneByte(strings.NewReader(s)), max: max})
+		return err
+	}
+	// A run counts every byte after a '<' (tag name included): "a>" + 8 = 10.
+	if err := read("<a>"+strings.Repeat("x", 8)+"</a><b>"+strings.Repeat("y", 8)+"</b>", 10); err != nil {
+		t.Errorf("runs of exactly max rejected: %v", err)
+	}
+	for name, doc := range map[string]string{
+		"text node":    "<a>" + strings.Repeat("x", 11) + "</a>",
+		"trailing":     "<a>" + strings.Repeat("x", 11),
+		"leading":      strings.Repeat("x", 11) + "<a/>",
+		"attribute":    `<a b="` + strings.Repeat("x", 11) + `"/>`,
+		"split chunks": "<a>" + strings.Repeat("x", 6) + strings.Repeat("y", 6),
+	} {
+		if err := read(doc, 10); !errors.Is(err, errIPTVEPGTextRun) {
+			t.Errorf("%s: err = %v; want errIPTVEPGTextRun", name, err)
+		}
+	}
+}
+
+// iotestOneByte returns a reader yielding one byte per Read, so the run
+// counting is exercised across chunk boundaries.
+func iotestOneByte(r io.Reader) io.Reader { return oneByteReader{r} }
+
+type oneByteReader struct{ r io.Reader }
+
+func (o oneByteReader) Read(p []byte) (int, error) { return o.r.Read(p[:min(1, len(p))]) }
+
+func TestParseXMLTVBoundedProgramme(t *testing.T) {
+	now := time.Now().UTC()
+	var b strings.Builder
+	b.WriteString(`<tv><programme start="` + xmltvTime(now, "+0000") + `" stop="` + xmltvTime(now.Add(time.Hour), "+0000") + `" channel="a">`)
+	for i := range 2000 { // far more children than anything is kept of
+		fmt.Fprintf(&b, `<title>t%d</title><desc>d%d</desc><category>c%d</category><icon src="i%d"/><episode-num system="onscreen">e%d</episode-num><x><title>nested</title></x>`, i, i, i, i, i)
+	}
+	b.WriteString(`</programme></tv>`)
+	progs, _, err := parseXMLTV(strings.NewReader(b.String()), map[string]struct{}{"a": {}}, now)
+	if err != nil || len(progs["a"]) != 1 {
+		t.Fatalf("progs = %+v, err = %v", progs, err)
+	}
+	p := progs["a"][0]
+	if p.Title != "t0" || p.Desc != "d0" || p.Icon != "i0" || p.Episode != "e0" || len(p.Genres) != iptvEPGMaxGenres {
+		t.Errorf("programme = %+v; want the first title/desc/icon/episode and %d genres", p, iptvEPGMaxGenres)
+	}
+}
+
+func TestParseXMLTVTotalCap(t *testing.T) {
+	old := iptvEPGMaxProgrammes
+	iptvEPGMaxProgrammes = 5
+	t.Cleanup(func() { iptvEPGMaxProgrammes = old })
+	now := time.Now().UTC()
+	var b strings.Builder
+	b.WriteString(`<tv>`)
+	for _, ch := range []string{"a", "b", "c"} { // file order: a, then b, then c
+		for i := range 3 {
+			s := now.Add(time.Duration(i) * time.Hour)
+			b.WriteString(xmltvProg(ch, s, s.Add(time.Hour), `<title>`+ch+`</title>`))
+		}
+	}
+	b.WriteString(`</tv>`)
+	progs, st, err := parseXMLTV(strings.NewReader(b.String()), map[string]struct{}{"a": {}, "b": {}, "c": {}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progs["a"]) != 3 || len(progs["b"]) != 2 || len(progs["c"]) != 0 {
+		t.Errorf("kept a=%d b=%d c=%d; want 3, 2, 0 (the channels after the cutoff lose out)", len(progs["a"]), len(progs["b"]), len(progs["c"]))
+	}
+	if st.DroppedTotal != 4 || st.ChannelsEmpty != 1 || st.DroppedPerChannel != 0 {
+		t.Errorf("stats = %+v; want 4 dropped over the total cap and 1 channel left empty", st)
+	}
+}
+
+func TestIPTVEPGFetch(t *testing.T) {
+	now := time.Now().UTC()
+	doc := `<tv>` + xmltvProg("a", now, now.Add(time.Hour), `<title>One</title>`) + `</tv>`
+	gz := func(s string) []byte {
+		var b bytes.Buffer
+		zw := gzip.NewWriter(&b)
+		_, _ = zw.Write([]byte(s))
+		_ = zw.Close()
+		return b.Bytes()
+	}
+	serve := func(body []byte, code int) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+			_, _ = w.Write(body)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL + "/guide.xml.gz" // the name is irrelevant: detection is by magic bytes
+	}
+	caps := func(compressed, decoded int64) {
+		oc, od := iptvEPGMaxCompressed, iptvEPGMaxBytes
+		iptvEPGMaxCompressed, iptvEPGMaxBytes = compressed, decoded
+		t.Cleanup(func() { iptvEPGMaxCompressed, iptvEPGMaxBytes = oc, od })
+	}
+	wanted := map[string]struct{}{"a": {}}
+	ctx := t.Context()
+
+	for name, body := range map[string][]byte{"plain": []byte(doc), "gzip": gz(doc)} {
+		progs, _, err := iptvEPGFetch(ctx, serve(body, http.StatusOK), wanted, now)
+		if err != nil || len(progs["a"]) != 1 || progs["a"][0].Title != "One" {
+			t.Errorf("%s: progs = %+v, err = %v", name, progs, err)
+		}
+	}
+
+	if _, _, err := iptvEPGFetch(ctx, serve([]byte(doc), http.StatusNotFound), wanted, now); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Errorf("non-200: err = %v; want HTTP 404", err)
+	}
+	if _, _, err := iptvEPGFetch(ctx, serve([]byte{0x1f, 0x8b, 0, 0}, http.StatusOK), wanted, now); err == nil {
+		t.Error("a truncated gzip header was accepted")
+	}
+
+	// Compressed cap: a gzip body over it fails, even though it would decode small.
+	small := gz(doc)
+	caps(int64(len(small))-1, 1<<20)
+	if _, _, err := iptvEPGFetch(ctx, serve(small, http.StatusOK), wanted, now); !errors.Is(err, errIPTVEPGTooLarge) {
+		t.Errorf("compressed cap: err = %v; want errIPTVEPGTooLarge", err)
+	}
+	// ... and exactly at the cap it is fine.
+	caps(int64(len(small)), 1<<20)
+	if _, _, err := iptvEPGFetch(ctx, serve(small, http.StatusOK), wanted, now); err != nil {
+		t.Errorf("gzip at the compressed cap: %v", err)
+	}
+
+	// Decompressed cap: a small gzip that inflates past it (a gzip bomb).
+	bomb := gz("<tv>" + strings.Repeat("<!-- -->\n", 50000) + "</tv>")
+	caps(1<<20, 100<<10)
+	if len(bomb) >= 100<<10 {
+		t.Fatalf("test bomb is %d bytes compressed; want it far below the decoded cap", len(bomb))
+	}
+	if _, _, err := iptvEPGFetch(ctx, serve(bomb, http.StatusOK), wanted, now); !errors.Is(err, errIPTVEPGTooLarge) {
+		t.Errorf("decompressed cap: err = %v; want errIPTVEPGTooLarge", err)
+	}
+	// A plain body counts against the decoded cap, not the gzip cap.
+	caps(1, 1<<20)
+	if _, _, err := iptvEPGFetch(ctx, serve([]byte(doc), http.StatusOK), wanted, now); err != nil {
+		t.Errorf("plain body under the decoded cap: %v", err)
+	}
+
+	// An oversized text node fails the load instead of being buffered.
+	caps(1<<20, 1<<30)
+	old := iptvEPGMaxTextRun
+	iptvEPGMaxTextRun = 1 << 10
+	t.Cleanup(func() { iptvEPGMaxTextRun = old })
+	huge := `<tv><programme start="x" channel="a"><desc>` + strings.Repeat("d", 4<<10) + `</desc></programme></tv>`
+	if _, _, err := iptvEPGFetch(ctx, serve([]byte(huge), http.StatusOK), wanted, now); !errors.Is(err, errIPTVEPGTextRun) {
+		t.Errorf("oversized text node: err = %v; want errIPTVEPGTextRun", err)
 	}
 }

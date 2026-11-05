@@ -12,7 +12,10 @@ package api
 // overlap [now-iptvEPGPast, now+iptvEPGFuture). The result is cached for
 // iptvTTL and kept when a refresh fails. A request waits at most
 // iptvEPGFirstWait for the very first load and otherwise answers without
-// programmes. Memory is bounded by the caps below, not by the guide size.
+// programmes. Memory is bounded by the caps below, not by the guide size:
+// a text node or tag over iptvEPGMaxTextRun fails the load (encoding/xml
+// buffers each one whole), each programme keeps a bounded set of fields, and
+// at most iptvEPGMaxPerChannel / iptvEPGMaxProgrammes programmes are retained.
 //
 // A programme becomes a stremio-core Video with VideoEpgInfo flattened onto
 // it (src/types/resource/meta_item.rs): id "<channelId>:<startUnix>", title,
@@ -21,12 +24,14 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"net/http"
 	"slices"
@@ -41,16 +46,24 @@ import (
 
 const (
 	iptvEPGFetchTimeout  = 3 * time.Minute
-	iptvEPGMaxCompressed = 64 << 20  // gzip body cap
-	iptvEPGMaxBytes      = 512 << 20 // decoded XML cap (also the cap for a plain body)
 	iptvEPGPast          = 24 * time.Hour
 	iptvEPGFuture        = 48 * time.Hour
 	iptvEPGMaxPerChannel = 300
-	iptvEPGMaxProgrammes = 300000 // retained programmes over all channels
 	iptvEPGMaxTitle      = 200
 	iptvEPGMaxDesc       = 1000
+	iptvEPGMaxIcon       = 500
 	iptvEPGMaxGenres     = 8
 	iptvEPGMaxGenreLen   = 60
+)
+
+// The caps below are variables only so tests can lower them.
+var (
+	iptvEPGMaxCompressed = int64(64 << 20)  // gzip body cap
+	iptvEPGMaxBytes      = int64(512 << 20) // decoded XML cap (also the cap for a plain body)
+	iptvEPGMaxProgrammes = 300000           // retained programmes over all channels
+	// iptvEPGMaxTextRun caps the bytes between two '<' (a text node, or a tag
+	// with its attributes): encoding/xml buffers a whole one in memory.
+	iptvEPGMaxTextRun = 256 << 10
 )
 
 // iptvEPGFirstWait bounds how long a request waits for a first guide load; a
@@ -98,21 +111,24 @@ func (p *iptvProgramme) video(channelID string) map[string]any {
 // matched by: trimmed, case-insensitive.
 func iptvEPGKey(id string) string { return strings.ToLower(strings.TrimSpace(id)) }
 
-// iptvTVGSig fingerprints the set of tvg-ids of a playlist (order-free), so a
-// guide is reloaded when a playlist refresh changes which channels it needs.
+// iptvTVGSig fingerprints the set of distinct tvg-ids of a playlist (the
+// sorted, lower-cased ids hashed together), so a guide is reloaded exactly when
+// a playlist refresh changes which channels it needs.
 func iptvTVGSig(chs []iptvChannel) string {
-	var x uint64
-	n := 0
+	ids := make([]string, 0, len(chs))
 	for i := range chs {
-		if chs[i].TVGID == "" {
-			continue
+		if chs[i].TVGID != "" {
+			ids = append(ids, iptvEPGKey(chs[i].TVGID))
 		}
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(iptvEPGKey(chs[i].TVGID)))
-		x ^= h.Sum64()
-		n++
 	}
-	return strconv.Itoa(n) + ":" + strconv.FormatUint(x, 16)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	h := sha256.New()
+	for _, id := range ids {
+		_, _ = h.Write([]byte(id))
+		_, _ = h.Write([]byte{'\n'})
+	}
+	return strconv.Itoa(len(ids)) + ":" + hex.EncodeToString(h.Sum(nil)[:12])
 }
 
 // ---- cache -----------------------------------------------------------------
@@ -162,12 +178,12 @@ func (e *iptvEPGSource) load(u, sig string, wanted func() map[string]struct{}, d
 	ids := wanted()
 	progs := map[string][]iptvProgramme{}
 	var (
-		truncated bool
-		err       error
+		st  iptvEPGStats
+		err error
 	)
 	if len(ids) > 0 { // nothing to match: skip downloading the guide
 		ctx, cancel := context.WithTimeout(context.Background(), iptvEPGFetchTimeout)
-		progs, truncated, err = iptvEPGFetch(ctx, u, ids, time.Now())
+		progs, st, err = iptvEPGFetch(ctx, u, ids, time.Now())
 		cancel()
 	}
 	now := time.Now()
@@ -188,7 +204,11 @@ func (e *iptvEPGSource) load(u, sig string, wanted func() map[string]struct{}, d
 	for _, ps := range progs {
 		n += len(ps)
 	}
-	logging.For("iptv").Info("guide loaded", "url", redactURL(u), "channels", len(progs), "programmes", n, "truncated", truncated)
+	logging.For("iptv").Info("guide loaded", "url", redactURL(u), "channels", len(progs), "programmes", n)
+	if st.DroppedTotal > 0 || st.DroppedPerChannel > 0 {
+		logging.For("iptv").Warn("guide programmes dropped by the caps", "url", redactURL(u),
+			"over_total_cap", st.DroppedTotal, "channels_left_empty", st.ChannelsEmpty, "over_channel_cap", st.DroppedPerChannel)
+	}
 }
 
 func (e *iptvEPGSource) snapshot() map[string][]iptvProgramme {
@@ -286,7 +306,10 @@ func (s *server) iptvGuide(r *http.Request, wait bool) iptvGuide {
 
 // ---- fetch + parse ---------------------------------------------------------
 
-var errIPTVEPGTooLarge = errors.New("guide exceeds the size cap")
+var (
+	errIPTVEPGTooLarge = errors.New("guide exceeds the size cap")
+	errIPTVEPGTextRun  = errors.New("guide has an oversized text node")
+)
 
 // iptvCapReader fails with errIPTVEPGTooLarge once more than max bytes have
 // been read, so an oversized guide is rejected instead of silently cut.
@@ -305,10 +328,45 @@ func (c *iptvCapReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func iptvEPGFetch(ctx context.Context, u string, wanted map[string]struct{}, now time.Time) (map[string][]iptvProgramme, bool, error) {
+// iptvRunReader fails with errIPTVEPGTextRun when more than max bytes pass
+// without a '<'. encoding/xml buffers a whole text node (even one that is
+// skipped) and a whole tag, so this bounds its per-token memory.
+type iptvRunReader struct {
+	r   io.Reader
+	run int
+	max int
+}
+
+func (c *iptvRunReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	for rest := p[:n]; ; {
+		i := bytes.IndexByte(rest, '<')
+		if i < 0 {
+			c.run += len(rest)
+			break
+		}
+		if c.run+i > c.max {
+			return 0, errIPTVEPGTextRun
+		}
+		c.run, rest = 0, rest[i+1:]
+	}
+	if c.run > c.max {
+		return 0, errIPTVEPGTextRun
+	}
+	return n, err
+}
+
+// iptvEPGStats reports what the caps cost a load.
+type iptvEPGStats struct {
+	DroppedTotal      int // matching programmes dropped by iptvEPGMaxProgrammes
+	ChannelsEmpty     int // channels that got none because of it (the ones later in the file)
+	DroppedPerChannel int // matching programmes dropped by iptvEPGMaxPerChannel
+}
+
+func iptvEPGFetch(ctx context.Context, u string, wanted map[string]struct{}, now time.Time) (map[string][]iptvProgramme, iptvEPGStats, error) {
 	resp, err := iptvGet(ctx, iptvEPGClient, u, "guide")
 	if err != nil {
-		return nil, false, err
+		return nil, iptvEPGStats{}, err
 	}
 	defer resp.Body.Close()
 	br := bufio.NewReaderSize(resp.Body, 64<<10)
@@ -316,39 +374,136 @@ func iptvEPGFetch(ctx context.Context, u string, wanted map[string]struct{}, now
 	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
 		zr, err := gzip.NewReader(&iptvCapReader{r: br, max: iptvEPGMaxCompressed})
 		if err != nil {
-			return nil, false, fmt.Errorf("gzip guide: %w", err)
+			return nil, iptvEPGStats{}, fmt.Errorf("gzip guide: %w", err)
 		}
 		defer zr.Close()
 		rd = &iptvCapReader{r: zr, max: iptvEPGMaxBytes}
 	}
-	return parseXMLTV(rd, wanted, now)
+	return parseXMLTV(&iptvRunReader{r: rd, max: iptvEPGMaxTextRun}, wanted, now)
 }
 
-// xmltvProgramme holds the children of a <programme> the guide uses.
+// xmltvProgramme holds what is read of a <programme>'s children; everything
+// is bounded (first title / sub-title / desc / icon, a few categories and
+// episode numbers), however many elements the guide has.
 type xmltvProgramme struct {
-	Titles     []string `xml:"title"`
-	SubTitles  []string `xml:"sub-title"`
-	Descs      []string `xml:"desc"`
-	Categories []string `xml:"category"`
-	Icons      []struct {
-		Src string `xml:"src,attr"`
-	} `xml:"icon"`
-	Episodes []struct {
-		System string `xml:"system,attr"`
-		Text   string `xml:",chardata"`
-	} `xml:"episode-num"`
+	title, subTitle, desc, icon string
+	categories                  []string
+	onscreen, xmltvNS           string
+}
+
+// readProgramme reads the children of the <programme> start element se up to
+// its end tag, keeping only the bounded fields of xmltvProgramme.
+func readProgramme(d *xml.Decoder) (x xmltvProgramme, err error) {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return x, err
+		}
+		switch t := tok.(type) {
+		case xml.EndElement:
+			return x, nil
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "icon":
+				if x.icon == "" {
+					for _, a := range t.Attr {
+						if a.Name.Local == "src" {
+							x.icon = clipText(a.Value, iptvEPGMaxIcon)
+						}
+					}
+				}
+				err = d.Skip()
+			case "title", "sub-title", "desc", "category", "episode-num":
+				var text string
+				if text, err = readText(d, 4*iptvEPGMaxDesc); err == nil {
+					x.set(t, text)
+				}
+			default:
+				err = d.Skip()
+			}
+			if err != nil {
+				return x, err
+			}
+		}
+	}
+}
+
+// set stores the text of one child element (first value wins, categories and
+// episode numbers up to their caps).
+func (x *xmltvProgramme) set(se xml.StartElement, text string) {
+	switch se.Name.Local {
+	case "title":
+		if x.title == "" {
+			x.title = clipText(text, iptvEPGMaxTitle)
+		}
+	case "sub-title":
+		if x.subTitle == "" {
+			x.subTitle = clipText(text, iptvEPGMaxTitle)
+		}
+	case "desc":
+		if x.desc == "" {
+			x.desc = clipText(text, iptvEPGMaxDesc)
+		}
+	case "category":
+		if c := clipText(text, iptvEPGMaxGenreLen); c != "" && len(x.categories) < iptvEPGMaxGenres && !slices.Contains(x.categories, c) {
+			x.categories = append(x.categories, c)
+		}
+	case "episode-num":
+		system := ""
+		for _, a := range se.Attr {
+			if a.Name.Local == "system" {
+				system = a.Value
+			}
+		}
+		switch system {
+		case "onscreen":
+			if x.onscreen == "" {
+				x.onscreen = clipText(text, iptvEPGMaxGenreLen)
+			}
+		case "xmltv_ns":
+			if x.xmltvNS == "" {
+				x.xmltvNS = xmltvNSEpisode(text)
+			}
+		}
+	}
+}
+
+// readText collects the character data of the element just opened, up to its
+// end tag, keeping at most limit bytes; nested elements are skipped.
+func readText(d *xml.Decoder, limit int) (string, error) {
+	var b strings.Builder
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			if room := limit - b.Len(); room > 0 {
+				b.Write(t[:min(room, len(t))])
+			}
+		case xml.StartElement:
+			if err := d.Skip(); err != nil {
+				return "", err
+			}
+		case xml.EndElement:
+			return b.String(), nil
+		}
+	}
 }
 
 // parseXMLTV streams an XMLTV document and returns, per lower-cased channel
 // id in wanted, the programmes overlapping [now-iptvEPGPast, now+iptvEPGFuture)
-// sorted by start (at most iptvEPGMaxPerChannel each, iptvEPGMaxProgrammes in
-// total; truncated reports that the total cap stopped the parse).
-func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs map[string][]iptvProgramme, truncated bool, err error) {
+// sorted by start, at most iptvEPGMaxPerChannel each and iptvEPGMaxProgrammes
+// in total. Over the total cap the programmes of channels later in the file
+// are dropped (the rest of the file is still read, to count them in stats).
+func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs map[string][]iptvProgramme, st iptvEPGStats, err error) {
 	winStart, winEnd := now.Add(-iptvEPGPast), now.Add(iptvEPGFuture)
 	d := xml.NewDecoder(rd)
 	d.Strict = false
 	d.CharsetReader = iptvCharset
 	progs = map[string][]iptvProgramme{}
+	empty := map[string]struct{}{} // channels that lost every programme to the total cap
 	total := 0
 	for {
 		tok, err := d.Token()
@@ -356,18 +511,15 @@ func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs 
 			break
 		}
 		if err != nil {
-			return nil, false, fmt.Errorf("parse guide: %w", err)
+			return nil, st, fmt.Errorf("parse guide: %w", err)
 		}
 		se, ok := tok.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		if se.Name.Local == "tv" {
+		if !ok || se.Name.Local == "tv" {
 			continue
 		}
 		if se.Name.Local != "programme" {
 			if err := d.Skip(); err != nil {
-				return nil, false, fmt.Errorf("parse guide: %w", err)
+				return nil, st, fmt.Errorf("parse guide: %w", err)
 			}
 			continue
 		}
@@ -383,27 +535,37 @@ func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs 
 			}
 		}
 		key := iptvEPGKey(channel)
-		st, okStart := parseXMLTVTime(start)
+		st0, okStart := parseXMLTVTime(start)
 		en, okStop := parseXMLTVTime(stop)
 		_, match := wanted[key]
-		if !match || !okStart || !st.Before(winEnd) || (okStop && !en.After(winStart)) || len(progs[key]) >= iptvEPGMaxPerChannel {
+		take := match && okStart && st0.Before(winEnd) && (!okStop || en.After(winStart))
+		switch {
+		case take && len(progs[key]) >= iptvEPGMaxPerChannel:
+			st.DroppedPerChannel++
+			take = false
+		case take && total >= iptvEPGMaxProgrammes:
+			st.DroppedTotal++
+			if len(progs[key]) == 0 {
+				empty[key] = struct{}{}
+			}
+			take = false
+		}
+		if !take {
 			if err := d.Skip(); err != nil {
-				return nil, false, fmt.Errorf("parse guide: %w", err)
+				return nil, st, fmt.Errorf("parse guide: %w", err)
 			}
 			continue
 		}
-		var x xmltvProgramme
-		if err := d.DecodeElement(&x, &se); err != nil {
-			return nil, false, fmt.Errorf("parse guide: %w", err)
+		x, err := readProgramme(d)
+		if err != nil {
+			return nil, st, fmt.Errorf("parse guide: %w", err)
 		}
-		if p, ok := x.programme(st, en, okStop); ok {
+		if p, ok := x.programme(st0, en, okStop); ok {
 			progs[key] = append(progs[key], p)
-			if total++; total >= iptvEPGMaxProgrammes {
-				truncated = true
-				break
-			}
+			total++
 		}
 	}
+	st.ChannelsEmpty = len(empty)
 	for key, ps := range progs {
 		if ps = finishProgrammes(ps); len(ps) == 0 {
 			delete(progs, key)
@@ -411,7 +573,7 @@ func parseXMLTV(rd io.Reader, wanted map[string]struct{}, now time.Time) (progs 
 			progs[key] = ps
 		}
 	}
-	return progs, truncated, nil
+	return progs, st, nil
 }
 
 // finishProgrammes sorts by start, drops repeated starts and gives a
@@ -442,38 +604,17 @@ func (x *xmltvProgramme) programme(start, end time.Time, hasEnd bool) (iptvProgr
 	if hasEnd {
 		p.End = end
 	}
-	if len(x.Titles) == 0 || strings.TrimSpace(x.Titles[0]) == "" {
+	if x.title == "" {
 		return p, false
 	}
-	p.Title = clipText(x.Titles[0], iptvEPGMaxTitle)
-	if len(x.SubTitles) > 0 {
-		if sub := clipText(x.SubTitles[0], iptvEPGMaxTitle); sub != "" {
-			p.Title += " - " + sub
-		}
+	p.Title = x.title
+	if x.subTitle != "" {
+		p.Title += " - " + x.subTitle
 	}
-	if len(x.Descs) > 0 {
-		p.Desc = clipText(x.Descs[0], iptvEPGMaxDesc)
-	}
-	if len(x.Icons) > 0 {
-		p.Icon = strings.TrimSpace(x.Icons[0].Src)
-	}
-	for _, c := range x.Categories {
-		if c = clipText(c, iptvEPGMaxGenreLen); c != "" && len(p.Genres) < iptvEPGMaxGenres && !slices.Contains(p.Genres, c) {
-			p.Genres = append(p.Genres, c)
-		}
-	}
-	for _, e := range x.Episodes {
-		switch e.System {
-		case "onscreen":
-			p.Episode = clipText(e.Text, iptvEPGMaxGenreLen)
-		case "xmltv_ns":
-			if p.Episode == "" {
-				p.Episode = xmltvNSEpisode(e.Text)
-			}
-		}
-		if e.System == "onscreen" && p.Episode != "" {
-			break // onscreen wins over xmltv_ns
-		}
+	p.Desc, p.Icon, p.Genres = x.desc, x.icon, x.categories
+	p.Episode = x.onscreen // onscreen wins over xmltv_ns
+	if p.Episode == "" {
+		p.Episode = x.xmltvNS
 	}
 	return p, true
 }
@@ -557,42 +698,52 @@ func parseXMLTVTime(s string) (time.Time, bool) {
 	return t.Add(-time.Duration(sign) * (time.Duration(hh)*time.Hour + time.Duration(mm)*time.Minute)), true
 }
 
-// iptvCharset lets the XML decoder read the Latin-1 guides some providers
-// still publish; every other non-UTF-8 charset is rejected.
+// iptvCharset lets the XML decoder read the Latin-1 / Windows-1252 guides some
+// providers still publish; every other non-UTF-8 charset is rejected.
 func iptvCharset(label string, in io.Reader) (io.Reader, error) {
 	switch strings.ToLower(label) {
 	case "utf-8", "utf8", "us-ascii", "ascii":
 		return in, nil
-	case "iso-8859-1", "latin1", "windows-1252":
+	case "iso-8859-1", "latin1":
 		return &latin1Reader{r: in}, nil
+	case "windows-1252", "cp1252":
+		return &latin1Reader{r: in, cp1252: true}, nil
 	}
 	return nil, fmt.Errorf("unsupported guide charset %q", label)
 }
 
-// latin1Reader transcodes ISO-8859-1 to UTF-8 (windows-1252 is treated alike).
+// cp1252High maps the bytes 0x80-0x9F of Windows-1252 (the five undefined
+// ones to the C1 controls, as browsers do).
+var cp1252High = [32]rune{
+	0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+	0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+	0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+	0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+}
+
+// latin1Reader transcodes ISO-8859-1, or with cp1252 Windows-1252, to UTF-8.
 type latin1Reader struct {
-	r   io.Reader
-	buf []byte
+	r      io.Reader
+	cp1252 bool
+	buf    []byte
 }
 
 func (l *latin1Reader) Read(p []byte) (int, error) {
-	if len(p) < 2 {
+	if len(p) < utf8.UTFMax {
 		return 0, io.ErrShortBuffer
 	}
-	n := len(p) / 2
+	n := len(p) / utf8.UTFMax // every input byte expands to at most 3
 	if cap(l.buf) < n {
 		l.buf = make([]byte, n)
 	}
 	in, err := l.r.Read(l.buf[:n])
-	out := 0
+	out := p[:0]
 	for _, b := range l.buf[:in] {
-		if b < 0x80 {
-			p[out] = b
-			out++
-			continue
+		r := rune(b)
+		if l.cp1252 && b >= 0x80 && b < 0xA0 {
+			r = cp1252High[b-0x80]
 		}
-		p[out], p[out+1] = 0xC0|b>>6, 0x80|b&0x3F
-		out += 2
+		out = utf8.AppendRune(out, r)
 	}
-	return out, err
+	return len(out), err
 }
