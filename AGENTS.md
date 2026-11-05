@@ -56,7 +56,7 @@ Settings persist to `<APP_PATH>/server-settings.json` via atomic temp+rename.
 |---|---|
 | `cmd/rivulet-engine` | entrypoint: env parsing, wiring, TLS, graceful shutdown, pprof |
 | `internal/types` | shared contract: `Config` + `Engine`/`EngineManager`/`SettingsStore`/`MediaProber` interfaces + `Stats`/`Options` wire structs |
-| `internal/api` | enginefs routes, streaming, proxy, casting, addons (`archive.go`, `nzb.go`, `ftp.go`, `bitmagnet.go`, `torznab.go`, `localaddon.go`, `youtube.go`, `gethttps.go`) |
+| `internal/api` | enginefs routes, streaming, proxy, casting, addons (`archive.go`, `nzb.go`, `ftp.go`, `bitmagnet.go`, `torznab.go`, `iptv.go`, `localaddon.go`, `youtube.go`, `gethttps.go`) |
 | `internal/engine` | anacrolix client wrapper, readers, trackers, LRU cache eviction, in-RAM piece storage |
 | `internal/media` | `ffprobe`/`ffmpeg` shell-outs: probe, HLS transcode, subtitles, opensub hash |
 | `internal/streamproxy` | `/proxy` HLS/DASH rewrite, DRM decrypt, signed URLs, segment cache |

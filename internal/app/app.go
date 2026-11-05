@@ -155,6 +155,7 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		BitmagnetURL:        getenv(lookup, "RIVULET_BITMAGNET_URL", ""),
 		TorznabURL:          getenv(lookup, "RIVULET_TORZNAB_URL", ""),
 		TorznabAPIKey:       getenv(lookup, "RIVULET_TORZNAB_APIKEY", ""),
+		IPTVPlaylists:       iptvPlaylists(lookup),                               // M3U playlists for the /iptv add-on; "" / off disables (RIVULET_IPTV_PLAYLISTS)
 		MetadataURL:         metadataURL(lookup),                                 // Cinemeta-compatible meta addon base; "" disables (RIVULET_METADATA_URL)
 		DisableTrackers:     envBool(lookup, "RIVULET_DISABLE_TRACKERS", false),  // disable all tracker announces (DHT/PEX/webseeds still used); accepts 1/true/0/false
 		DisableWebtorrent:   envBool(lookup, "RIVULET_DISABLE_WEBTORRENT", true), // default disabled; set =0/false to enable WebRTC/WebTorrent (pion) peers

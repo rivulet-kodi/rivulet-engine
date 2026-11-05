@@ -121,6 +121,16 @@ values = ["local:99775d46aa43242f", "local:99775d46aa43242f.json"]
 [dictionaries.local-types]
 values = ["movie", "other"]
 
+# Channel ids of tests/apifuzz/fixtures.py IPTV_PLAYLIST (clip.ts, then clip.mp4).
+[dictionaries.iptv-ids]
+values = ["iptv:a1d0e550ed549ef3fa1497277a39529f", "iptv:c55c5e7abd7f3dd6b1fee8ac08081850.json"]
+
+[dictionaries.iptv-catalogs]
+values = ["iptv0", "iptv0.json"]
+
+[dictionaries.iptv-extras]
+values = ["genre=News.json", "search=fuzz&skip=1.json"]
+
 # Written by `fixtures.py setup`: one finished recording for the read and stop
 # routes, and several for the routes that delete one (a delete consumes it).
 [dictionaries.recordings-keep]
@@ -282,3 +292,20 @@ include-name-regex = '^GET /local-addon/(catalog|meta|stream)/'
 [operations.parameters]
 type = { dictionary = "local-types", probability = 0.8 }
 id = { dictionary = "local-ids", probability = 0.8 }
+
+# --- IPTV add-on ---------------------------------------------------------------------
+
+[[operations]]
+include-path-regex = '^/iptv/catalog/'
+
+[operations.parameters]
+type = "tv"
+id = { dictionary = "iptv-catalogs", probability = 0.8 }
+extra = { dictionary = "iptv-extras", probability = 0.8 }
+
+[[operations]]
+include-path-regex = '^/iptv/(meta|stream)/'
+
+[operations.parameters]
+type = "tv"
+id = { dictionary = "iptv-ids", probability = 0.8 }

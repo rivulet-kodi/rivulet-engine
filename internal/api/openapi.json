@@ -3868,6 +3868,280 @@
         }
       }
     },
+    "/iptv/manifest.json": {
+      "get": {
+        "operationId": "iptvManifest",
+        "summary": "IPTV add-on manifest",
+        "description": "One `tv` catalog per configured playlist (`iptv0`, `iptv1`, …) with `genre` (options = distinct `group-title` values, absent until the playlist loads), `search` and `skip` extras. Fetches the playlists if not cached. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "tags": [
+          "Addons"
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Add-on manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IPTVManifest"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "IPTV add-on disabled (`RIVULET_IPTV_PLAYLISTS` unset) or unknown sub-route: `404 page not found`",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      }
+    },
+    "/iptv/catalog/{type}/{id}": {
+      "get": {
+        "operationId": "iptvCatalog",
+        "summary": "IPTV channel catalog",
+        "description": "Lists the channels of one playlist, 100 per page, in playlist order. Playlists are fetched lazily, cached for 6 h and served stale when a refresh fails; a playlist that cannot be fetched yields an empty list. Route as served: `/iptv/catalog/{type}/{id}.json` (the `.json` suffix is optional); extras may also be given as query parameters (`genre`, `search`, `skip`). Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "tags": [
+          "Addons"
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "description": "Content type; only `tv` produces results, anything else yields an empty result.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Catalog id `iptv<N>` (index into `RIVULET_IPTV_PLAYLISTS`); unknown ids yield an empty list. A trailing `.json` is stripped.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalog (empty for an unknown catalog, non-`tv` type or unavailable playlist)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IPTVCatalogResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "IPTV add-on disabled (`RIVULET_IPTV_PLAYLISTS` unset) or unknown sub-route: `404 page not found`",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      }
+    },
+    "/iptv/catalog/{type}/{id}/{extra}": {
+      "get": {
+        "operationId": "iptvCatalogExtra",
+        "summary": "IPTV channel catalog with extras",
+        "description": "Lists the channels of one playlist, 100 per page, in playlist order. Playlists are fetched lazily, cached for 6 h and served stale when a refresh fails; a playlist that cannot be fetched yields an empty list. Route as served: `/iptv/catalog/{type}/{id}/{extra}.json`, Stremio's extra-args form. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "tags": [
+          "Addons"
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "description": "Content type; only `tv` produces results, anything else yields an empty result.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Catalog id `iptv<N>`.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "extra",
+            "in": "path",
+            "required": true,
+            "description": "URL-encoded extras, e.g. `genre=News&skip=100.json` (`genre` exact group match, `search` case-insensitive name substring, `skip` offset). Unparseable extras are ignored.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalog page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IPTVCatalogResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "IPTV add-on disabled (`RIVULET_IPTV_PLAYLISTS` unset) or unknown sub-route: `404 page not found`",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      }
+    },
+    "/iptv/meta/{type}/{id}": {
+      "get": {
+        "operationId": "iptvMeta",
+        "summary": "IPTV channel meta",
+        "description": "Route as served: `/iptv/meta/{type}/{id}.json`. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "tags": [
+          "Addons"
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "description": "Content type; only `tv` produces results, anything else yields an empty result.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Channel id `iptv:<hex>`; a trailing `.json` is stripped.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Meta (`null` for an unknown id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IPTVMetaResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "IPTV add-on disabled (`RIVULET_IPTV_PLAYLISTS` unset) or unknown sub-route: `404 page not found`",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      }
+    },
+    "/iptv/stream/{type}/{id}": {
+      "get": {
+        "operationId": "iptvStream",
+        "summary": "IPTV channel stream",
+        "description": "Route as served: `/iptv/stream/{type}/{id}.json`. Returns the channel URL as-is, or — when the playlist entry carries request headers (`#EXTVLCOPT:http-referrer`/`http-user-agent`/`http-origin`, or a Kodi `url|Header=value` suffix) — an absolute `/proxy` URL (`/proxy/hls/manifest.m3u8` for `.m3u8`/`.m3u`, `/proxy/mpd/manifest.m3u8` for `.mpd`, else `/proxy/stream`) that sends those headers upstream, with `api_password` when `RIVULET_PROXY_PASSWORD` is set. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "tags": [
+          "Addons"
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "description": "Content type; only `tv` produces results, anything else yields an empty result.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Channel id `iptv:<hex>`; a trailing `.json` is stripped.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Streams (empty for an unknown id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IPTVStreamResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "IPTV add-on disabled (`RIVULET_IPTV_PLAYLISTS` unset) or unknown sub-route: `404 page not found`",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenOrigin"
+          }
+        }
+      }
+    },
     "/list": {
       "get": {
         "operationId": "listEngines",
@@ -10550,6 +10824,202 @@
         "required": [
           "success"
         ]
+      },
+      "IPTVCatalogResponse": {
+        "type": "object",
+        "properties": {
+          "metas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IPTVMetaPreview"
+            }
+          }
+        },
+        "required": [
+          "metas"
+        ],
+        "additionalProperties": false
+      },
+      "IPTVManifest": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "const": "community.rivulet-engine.iptv"
+          },
+          "version": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "idPrefixes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "extra": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "options": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "name",
+                "extra"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "name",
+          "description",
+          "resources",
+          "types",
+          "idPrefixes",
+          "catalogs"
+        ],
+        "additionalProperties": false
+      },
+      "IPTVMetaPreview": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "`iptv:<hex>`"
+          },
+          "type": {
+            "type": "string",
+            "const": "tv"
+          },
+          "name": {
+            "type": "string"
+          },
+          "poster": {
+            "type": "string"
+          },
+          "posterShape": {
+            "type": "string",
+            "const": "square"
+          },
+          "logo": {
+            "type": "string"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "IPTVMetaResponse": {
+        "type": "object",
+        "properties": {
+          "meta": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IPTVMetaPreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "meta"
+        ],
+        "additionalProperties": false
+      },
+      "IPTVStreamResponse": {
+        "type": "object",
+        "properties": {
+          "streams": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "title",
+                "url"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "streams"
+        ],
+        "additionalProperties": false
       },
       "LocalAddonCatalogResponse": {
         "type": "object",

@@ -233,6 +233,7 @@ Notes:
 | `RIVULET_BITMAGNET_URL` | _(unset)_ | Bitmagnet GraphQL endpoint → enables the `/bitmagnet` add-on |
 | `RIVULET_TORZNAB_URL` | _(unset)_ | Torznab indexer base URL → enables the `/torznab` add-on |
 | `RIVULET_TORZNAB_APIKEY` | _(unset)_ | API key for the Torznab indexer (required by Prowlarr / Jackett) |
+| `RIVULET_IPTV_PLAYLISTS` | _(unset)_ | Comma-separated M3U playlist URLs → enables the `/iptv` add-on (e.g. Free-TV's `playlist.m3u8`) |
 
 ---
 

@@ -307,7 +307,7 @@ func sideEffectingRoute(r *http.Request) bool {
 	}
 	switch first {
 	case "removeAll", "get-https", "casting", "probe", "tracks", "opensubHash",
-		"subtitlesTracks", "nzb", "ftp", "bitmagnet", "torznab":
+		"subtitlesTracks", "nzb", "ftp", "bitmagnet", "torznab", "iptv":
 		return true
 	case "zip", "rar", "7zip", "tar", "tgz":
 		return len(seg) >= 2 && seg[1] == "create"
@@ -784,6 +784,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleBitmagnet(w, r, strings.Split(path, "/"))
 	case "torznab":
 		s.handleTorznab(w, r, strings.Split(path, "/"))
+	case "iptv":
+		s.handleIPTV(w, r, strings.Split(path, "/"))
 	case "zip", "rar", "7zip", "tar", "tgz":
 		s.handleArchive(w, r, strings.Split(path, "/"), first)
 	case "nzb":
