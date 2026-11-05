@@ -376,7 +376,7 @@ func iptvEPGFetch(ctx context.Context, u string, wanted map[string]struct{}, now
 		if err != nil {
 			return nil, iptvEPGStats{}, fmt.Errorf("gzip guide: %w", err)
 		}
-		defer zr.Close()
+		defer func() { _ = zr.Close() }() // reader only: Close has nothing to flush
 		rd = &iptvCapReader{r: zr, max: iptvEPGMaxBytes}
 	}
 	return parseXMLTV(&iptvRunReader{r: rd, max: iptvEPGMaxTextRun}, wanted, now)
