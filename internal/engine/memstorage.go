@@ -101,9 +101,8 @@ package engine
 //   - anacrolix's reader retried every failed read on capped storage, by
 //     recursion, including a wait that failed because the stream's context
 //     ended or the torrent closed: closing a stream whose read was waiting for
-//     a piece overflowed the stack. go.mod replaces anacrolix with the
-//     M0Rf30/torrent fork carrying the fix (anacrolix/torrent#1168) until it
-//     lands upstream.
+//     a piece overflowed the stack. Fixed upstream by anacrolix/torrent#1168:
+//     only storage-read failures on a live torrent are retried now.
 //   - We only ever evict COMPLETE pieces, so in-flight (partially written)
 //     pieces are never dropped and anacrolix's chunk bookkeeping is never
 //     invalidated mid-download.
