@@ -8,7 +8,7 @@ go 1.27.3
 
 require (
 	github.com/anacrolix/dht/v2 v2.24.1-0.20260908044610-a669bdd3bdcf
-	github.com/anacrolix/torrent v1.61.1-0.20261024051421-5f95cd33fd29
+	github.com/anacrolix/torrent v1.61.1-0.20261105061516-8e67d734514c
 	github.com/bodgit/sevenzip v1.6.5
 	github.com/coder/websocket v1.8.15
 	github.com/daku10/go-lz-string v0.0.7
@@ -114,5 +114,3 @@ require (
 	modernc.org/sqlite v1.61.0 // indirect
 	zombiezen.com/go/sqlite v1.4.2 // indirect
 )
-
-replace github.com/anacrolix/torrent => github.com/M0Rf30/torrent v1.61.1-0.20261103191232-04ac8ed3c7d8
