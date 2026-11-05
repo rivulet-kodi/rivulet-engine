@@ -126,10 +126,11 @@ values = ["movie", "other"]
 values = ["iptv:a1d0e550ed549ef3fa1497277a39529f", "iptv:c55c5e7abd7f3dd6b1fee8ac08081850.json"]
 
 [dictionaries.iptv-catalogs]
-values = ["iptv0", "iptv0.json"]
+values = ["iptv0", "iptv0.json", "iptv0-guide", "iptv0-guide.json"]
 
+# Written by `fixtures.py setup`: genre/search/skip extras plus guide dates around today.
 [dictionaries.iptv-extras]
-values = ["genre=News.json", "search=fuzz&skip=1.json"]
+from-file = "/report/stateful/iptv-extras.dict"
 
 # Written by `fixtures.py setup`: one finished recording for the read and stop
 # routes, and several for the routes that delete one (a delete consumes it).

@@ -301,6 +301,7 @@ start_stateful() {
 		-e RIVULET_DVR_MAX_ACTIVE=16 \
 		-e LOCAL_FILES_DIR=/fixtures/library \
 		-e RIVULET_IPTV_PLAYLISTS=http://fixtures:8080/iptv.m3u \
+		-e RIVULET_IPTV_EPG=http://fixtures:8080/iptv-epg.xml.gz \
 		-e RIVULET_LOCAL_FILES_PUBLIC_URL="$stateful_url" \
 		"$engine_image" >/dev/null
 	wait_up "$stateful_engine"

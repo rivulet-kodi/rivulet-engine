@@ -3872,7 +3872,7 @@
       "get": {
         "operationId": "iptvManifest",
         "summary": "IPTV add-on manifest",
-        "description": "One `tv` catalog per configured playlist (`iptv0`, `iptv1`, …) with `genre` (options = distinct `group-title` values, absent until the playlist loads), `search` and `skip` extras. Fetches the playlists if not cached. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "description": "One `tv` catalog per configured playlist (`iptv0`, `iptv1`, …) with `genre` (options = distinct `group-title` values, absent until the playlist loads), `search` and `skip` extras. Fetches the playlists if not cached. With `RIVULET_IPTV_EPG` set the manifest also has `behaviorHints.epgProvider: true` and a guide catalog per playlist (`iptv0-guide`, …) declaring the `date` and `skip` extras (stremio-core's guide model); the guide load starts in the background. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
         "tags": [
           "Addons"
         ],
@@ -3908,7 +3908,7 @@
       "get": {
         "operationId": "iptvCatalog",
         "summary": "IPTV channel catalog",
-        "description": "Lists the channels of one playlist, 100 per page, in playlist order. Playlists are fetched lazily, cached for 6 h and served stale when a refresh fails; a playlist that cannot be fetched yields an empty list. Route as served: `/iptv/catalog/{type}/{id}.json` (the `.json` suffix is optional); extras may also be given as query parameters (`genre`, `search`, `skip`). Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "description": "Lists the channels of one playlist, 100 per page, in playlist order (numbered channels — `tvg-chno` — first, ascending). A guide catalog `iptv<N>-guide` instead answers `{\"metasDetailed\": [...]}`: the same channels and paging, each as a full meta whose `videos` are the programmes overlapping the UTC `date` (`YYYY-MM-DD`; missing or invalid = today UTC); channels with no programme that day are listed with empty `videos`. A first guide load is waited for at most ~2 s, after which the answer carries no programmes. Playlists are fetched lazily, cached for 6 h and served stale when a refresh fails; a playlist that cannot be fetched yields an empty list. Route as served: `/iptv/catalog/{type}/{id}.json` (the `.json` suffix is optional); extras may also be given as query parameters (`genre`, `search`, `skip`). Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
         "tags": [
           "Addons"
         ],
@@ -3927,7 +3927,7 @@
             "name": "id",
             "in": "path",
             "required": true,
-            "description": "Catalog id `iptv<N>` (index into `RIVULET_IPTV_PLAYLISTS`); unknown ids yield an empty list. A trailing `.json` is stripped.",
+            "description": "Catalog id `iptv<N>` (index into `RIVULET_IPTV_PLAYLISTS`) or `iptv<N>-guide`; unknown ids yield an empty list. A trailing `.json` is stripped.",
             "schema": {
               "type": "string",
               "minLength": 1
@@ -3965,7 +3965,7 @@
       "get": {
         "operationId": "iptvCatalogExtra",
         "summary": "IPTV channel catalog with extras",
-        "description": "Lists the channels of one playlist, 100 per page, in playlist order. Playlists are fetched lazily, cached for 6 h and served stale when a refresh fails; a playlist that cannot be fetched yields an empty list. Route as served: `/iptv/catalog/{type}/{id}/{extra}.json`, Stremio's extra-args form. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "description": "Lists the channels of one playlist, 100 per page, in playlist order (numbered channels — `tvg-chno` — first, ascending). A guide catalog `iptv<N>-guide` instead answers `{\"metasDetailed\": [...]}`: the same channels and paging, each as a full meta whose `videos` are the programmes overlapping the UTC `date` (`YYYY-MM-DD`; missing or invalid = today UTC); channels with no programme that day are listed with empty `videos`. A first guide load is waited for at most ~2 s, after which the answer carries no programmes. Playlists are fetched lazily, cached for 6 h and served stale when a refresh fails; a playlist that cannot be fetched yields an empty list. Route as served: `/iptv/catalog/{type}/{id}/{extra}.json`, Stremio's extra-args form. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
         "tags": [
           "Addons"
         ],
@@ -3984,7 +3984,7 @@
             "name": "id",
             "in": "path",
             "required": true,
-            "description": "Catalog id `iptv<N>`.",
+            "description": "Catalog id `iptv<N>` or `iptv<N>-guide`.",
             "schema": {
               "type": "string",
               "minLength": 1
@@ -3994,7 +3994,7 @@
             "name": "extra",
             "in": "path",
             "required": true,
-            "description": "URL-encoded extras, e.g. `genre=News&skip=100.json` (`genre` exact group match, `search` case-insensitive name substring, `skip` offset). Unparseable extras are ignored.",
+            "description": "URL-encoded extras, e.g. `genre=News&skip=100.json` (`genre` exact group match, `search` case-insensitive name substring, `skip` offset, and for a guide catalog `date` = `YYYY-MM-DD`). Unparseable extras are ignored.",
             "schema": {
               "type": "string",
               "minLength": 1
@@ -4032,7 +4032,7 @@
       "get": {
         "operationId": "iptvMeta",
         "summary": "IPTV channel meta",
-        "description": "Route as served: `/iptv/meta/{type}/{id}.json`. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "description": "Route as served: `/iptv/meta/{type}/{id}.json`. With `RIVULET_IPTV_EPG` set, `videos` lists the channel's programmes from now-2 h to now+24 h sorted by start (a first guide load is waited for at most ~2 s) and `behaviorHints.hasScheduledVideos` says whether there are any. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
         "tags": [
           "Addons"
         ],
@@ -4089,7 +4089,7 @@
       "get": {
         "operationId": "iptvStream",
         "summary": "IPTV channel stream",
-        "description": "Route as served: `/iptv/stream/{type}/{id}.json`. Returns the channel URL as-is, or — when the playlist entry carries request headers (`#EXTVLCOPT:http-referrer`/`http-user-agent`/`http-origin`, or a Kodi `url|Header=value` suffix) — an absolute `/proxy` URL (`/proxy/hls/manifest.m3u8` for `.m3u8`/`.m3u`, `/proxy/mpd/manifest.m3u8` for `.mpd`, else `/proxy/stream`) that sends those headers upstream, with `api_password` when `RIVULET_PROXY_PASSWORD` is set. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
+        "description": "Route as served: `/iptv/stream/{type}/{id}.json`. Returns the channel URL as-is, or — when the playlist entry carries request headers (EXTINF attributes or `#EXTVLCOPT:` lines named `http-referrer`/`http-user-agent`/`http-origin` — the `#EXTVLCOPT:` line wins — or a Kodi `url|Header=value` suffix, which wins over both) — an absolute `/proxy` URL (`/proxy/hls/manifest.m3u8` for `.m3u8`/`.m3u`, `/proxy/mpd/manifest.m3u8` for `.mpd`, else `/proxy/stream`) that sends those headers upstream, with `api_password` when `RIVULET_PROXY_PASSWORD` is set. Off by default: with `RIVULET_IPTV_PLAYLISTS` unset every /iptv/* route answers 404 text/plain `404 page not found`.",
         "tags": [
           "Addons"
         ],
@@ -10826,19 +10826,39 @@
         ]
       },
       "IPTVCatalogResponse": {
-        "type": "object",
-        "properties": {
-          "metas": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/IPTVMetaPreview"
-            }
+        "description": "A channel catalog answers `metas`; a guide catalog (`iptv<N>-guide`) answers `metasDetailed`.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "metas": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/IPTVMetaPreview"
+                }
+              }
+            },
+            "required": [
+              "metas"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "metasDetailed": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/IPTVMetaDetailed"
+                }
+              }
+            },
+            "required": [
+              "metasDetailed"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "metas"
-        ],
-        "additionalProperties": false
+        ]
       },
       "IPTVManifest": {
         "type": "object",
@@ -10848,7 +10868,8 @@
             "const": "community.rivulet-engine.iptv"
           },
           "version": {
-            "type": "string"
+            "type": "string",
+            "description": "`0.2.0`"
           },
           "name": {
             "type": "string"
@@ -10883,7 +10904,8 @@
                   "type": "string"
                 },
                 "id": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "`iptv<N>` (channels) or, with a guide, `iptv<N>-guide` (a guide catalog: it declares the `date` extra)"
                 },
                 "name": {
                   "type": "string"
@@ -10918,6 +10940,20 @@
               ],
               "additionalProperties": false
             }
+          },
+          "behaviorHints": {
+            "type": "object",
+            "description": "Present only when `RIVULET_IPTV_EPG` is set (stremio-core `epgProvider`: the add-on publishes guide catalogs).",
+            "properties": {
+              "epgProvider": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "epgProvider"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -10931,6 +10967,71 @@
           "catalogs"
         ],
         "additionalProperties": false
+      },
+      "IPTVMetaDetailed": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "`iptv:<hex>`"
+          },
+          "type": {
+            "type": "string",
+            "const": "tv"
+          },
+          "name": {
+            "type": "string"
+          },
+          "poster": {
+            "type": "string"
+          },
+          "posterShape": {
+            "type": "string",
+            "const": "square"
+          },
+          "logo": {
+            "type": "string"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "behaviorHints": {
+            "type": "object",
+            "properties": {
+              "isLive": {
+                "type": "boolean",
+                "const": true
+              },
+              "hasScheduledVideos": {
+                "type": "boolean",
+                "description": "`true` when `videos` is not empty"
+              }
+            },
+            "required": [
+              "isLive",
+              "hasScheduledVideos"
+            ],
+            "additionalProperties": false
+          },
+          "videos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IPTVProgramme"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "name",
+          "posterShape",
+          "behaviorHints"
+        ],
+        "additionalProperties": false,
+        "description": "A channel with its schedule. `videos` are the programmes (stremio-core `Video` + `VideoEpgInfo`), sorted by start; present only when `RIVULET_IPTV_EPG` is set."
       },
       "IPTVMetaPreview": {
         "type": "object",
@@ -10961,12 +11062,27 @@
             "items": {
               "type": "string"
             }
+          },
+          "behaviorHints": {
+            "type": "object",
+            "properties": {
+              "isLive": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "isLive"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
           "id",
           "type",
-          "name"
+          "name",
+          "posterShape",
+          "behaviorHints"
         ],
         "additionalProperties": false
       },
@@ -10976,7 +11092,7 @@
           "meta": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/IPTVMetaPreview"
+                "$ref": "#/components/schemas/IPTVMetaDetailed"
               },
               {
                 "type": "null"
@@ -10986,6 +11102,59 @@
         },
         "required": [
           "meta"
+        ],
+        "additionalProperties": false
+      },
+      "IPTVProgramme": {
+        "type": "object",
+        "description": "One programme of a channel's guide.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "`<channelId>:<startUnix>`"
+          },
+          "title": {
+            "type": "string",
+            "description": "`Title`, or `Title - Subtitle` when the guide has a sub-title"
+          },
+          "released": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Same as `startTime`"
+          },
+          "startTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC 3339, UTC"
+          },
+          "endTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC 3339, UTC"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "thumbnail": {
+            "type": "string"
+          },
+          "releaseInfo": {
+            "type": "string",
+            "description": "Episode label (`onscreen` episode-num, else `xmltv_ns` as `S1E6`)"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "released",
+          "startTime",
+          "endTime"
         ],
         "additionalProperties": false
       },

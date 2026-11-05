@@ -373,3 +373,27 @@ func TestHLSConfigTranscodeAheadBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestIPTVURLList(t *testing.T) {
+	cases := map[string][]string{
+		"":                        nil,
+		"off":                     nil,
+		"https://a.example/p.m3u": {"https://a.example/p.m3u"},
+		" https://a.example/x.xml.gz, ftp://b.example/y,not a url ,http://c.example/z.xml,": {"https://a.example/x.xml.gz", "http://c.example/z.xml"},
+	}
+	for in, want := range cases {
+		got := iptvURLList(MapLookup(map[string]string{"K": in}), "K", "iptv guide")
+		if len(got) != len(want) {
+			t.Errorf("iptvURLList(%q) = %v; want %v", in, got, want)
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("iptvURLList(%q) = %v; want %v", in, got, want)
+			}
+		}
+	}
+	if got := iptvURLList(MapLookup(nil), "K", "iptv guide"); got != nil {
+		t.Errorf("unset = %v; want nil", got)
+	}
+}

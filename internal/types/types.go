@@ -78,6 +78,10 @@ type Config struct {
 	// IPTV add-on (/iptv): M3U playlist URLs, one catalog each
 	// (RIVULET_IPTV_PLAYLISTS, comma-separated). Empty disables the add-on.
 	IPTVPlaylists []string
+	// XMLTV programme guides for the /iptv add-on (RIVULET_IPTV_EPG,
+	// comma-separated, plain or gzip). Empty = no guide: the manifest then has
+	// no epgProvider hint and no guide catalogs.
+	IPTVEPG []string
 
 	// Cinemeta-compatible metadata addon base URL used by the /bitmagnet and
 	// /torznab add-ons to resolve an IMDB id to a title (RIVULET_METADATA_URL).

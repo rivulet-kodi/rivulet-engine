@@ -19,7 +19,7 @@ The complete feature list, with the routes and behaviours behind the summary in 
 - **Subtitles** - SRT / WebVTT / ASS-SSA to WebVTT, OpenSubtitles hashing.
 - **Reverse proxy** (`/proxy`), **DLNA casting** (`/casting`, SSDP discovery +
   UPnP AVTransport control), **local-files addon** (`/local-addon`, IMDB-resolved),
-  **IPTV addon** (`/iptv`, opt-in M3U playlists as `tv` catalogs; see [IPTV](IPTV.md)),
+  **IPTV addon** (`/iptv`, opt-in M3U playlists as `tv` catalogs, optional XMLTV programme guide; see [IPTV](IPTV.md)),
   **YouTube** (`/yt`, via `yt-dlp`), and **`/get-https`** (Stremio cert provisioning).
 - **MediaFlow / EasyProxy compatible** - `/proxy/stream`, `/proxy/hls/manifest.m3u8`,
   `/proxy/mpd/manifest.m3u8`, `/proxy/ip`, `/generate_url`, plus a MediaFlow-style
