@@ -591,7 +591,7 @@ func nzbBuildSession(key, sig, nzbURL string, cfg nzb.ServerConfig) (*nzbSession
 	// re-validates every hop — api.go's getClient/httpGet must not be used
 	// here since this route fetches a caller-supplied URL unauthenticated.
 	if err := validateFetchHost(nzbURL); err != nil {
-		return nil, nzbCreateResult{status: http.StatusBadGateway, msg: err.Error()}
+		return nil, nzbCreateResult{status: http.StatusForbidden, msg: err.Error()}
 	}
 	nzbData, err := archiveFetchGet(nzbURL, nzbMaxDownloadBytes)
 	if err != nil {

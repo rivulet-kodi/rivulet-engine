@@ -32,8 +32,8 @@ func TestHandlerNZBCreate_BlocksPrivateURLByDefault(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("status = %d; want %d; body = %s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d; want %d; body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
 	}
 	if called {
 		t.Error("local handler was invoked; the NZB fetch should have been rejected before connecting")
