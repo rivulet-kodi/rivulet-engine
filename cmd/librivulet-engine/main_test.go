@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,6 +33,30 @@ func TestApplyOSEnv(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv("LOCAL_FILES_DIR"); ok {
 		t.Fatal("unset key not restored")
+	}
+}
+
+// TestApplyOSEnvPathReachesLookPath covers issue #89: on Android the c-shared
+// runtime starts with an empty environment, so envJSON's PATH is the only way
+// a host-bundled ffprobe/ffmpeg can be found by the bare-name exec calls.
+func TestApplyOSEnvPathReachesLookPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ffprobe")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+	if _, err := exec.LookPath("ffprobe"); err == nil {
+		t.Fatal("ffprobe found with an empty PATH")
+	}
+	restore := applyOSEnv(map[string]string{"PATH": dir})
+	got, err := exec.LookPath("ffprobe")
+	if err != nil || got != bin {
+		t.Fatalf("LookPath(ffprobe) = %q, %v; want %q", got, err, bin)
+	}
+	restore()
+	if os.Getenv("PATH") != "" {
+		t.Fatal("PATH not restored")
 	}
 }
 
