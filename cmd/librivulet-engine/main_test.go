@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,7 +42,11 @@ func TestApplyOSEnv(t *testing.T) {
 // a host-bundled ffprobe/ffmpeg can be found by the bare-name exec calls.
 func TestApplyOSEnvPathReachesLookPath(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "ffprobe")
+	name := "ffprobe"
+	if runtime.GOOS == "windows" {
+		name += ".exe" // LookPath only matches a PATHEXT extension there
+	}
+	bin := filepath.Join(dir, name)
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
