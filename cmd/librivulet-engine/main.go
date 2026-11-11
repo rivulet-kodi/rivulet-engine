@@ -219,7 +219,16 @@ func openLogFile(path string, warn io.Writer) (io.Writer, func()) {
 // osGetenvKeys are the knobs still read via os.Getenv directly in other
 // packages (not threaded through Lookup); envJSON values for them must be
 // mirrored into the process environment for library mode to honour them.
+//
+// PATH is here because ffmpeg, ffprobe and yt-dlp are run by bare name
+// (exec.Command / exec.LookPath search os.Getenv("PATH")), and on Android
+// Go's c-shared entry point (_rt0_*_android_lib) starts the runtime with no
+// environment at all: whatever the host setenv()s never reaches os.Getenv,
+// so without this the engine cannot find a host-bundled ffmpeg (issue #89).
+// The restore is deferred to the end of ServerStart, i.e. the server's whole
+// lifetime, so the value holds for every exec made while it runs.
 var osGetenvKeys = []string{
+	"PATH",
 	"RIVULET_LOG_LEVEL",
 	"RIVULET_LOG_FORMAT",
 	"RIVULET_HWACCEL",
