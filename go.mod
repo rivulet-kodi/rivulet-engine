@@ -4,7 +4,7 @@
 
 module github.com/rivulet-kodi/rivulet-engine
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/anacrolix/dht/v2 v2.24.1-0.20260908044610-a669bdd3bdcf
