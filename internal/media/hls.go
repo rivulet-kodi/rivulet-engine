@@ -1699,9 +1699,9 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 	// output survives a failed or timed-out retry.
 	began := time.Now()
 	want := segExpectation(kind, hasVideo, videoEnd, hasAudio, start, dur)
+	inspect := m.segmentInspector(s, n, filename, sessionDur, want)
 	retryTmp := segFile + ".retry.tmp.ts"
-	out, reason, err := transcodeChecked(dctx, filename, start, preRolls, [2]string{tmp, retryTmp}, encodeOnce,
-		func(path string) (segVerdict, error) { return inspectSegment(path, want) })
+	out, reason, err := transcodeChecked(dctx, filename, start, preRolls, [2]string{tmp, retryTmp}, encodeOnce, inspect)
 	if err != nil {
 		_ = os.Remove(tmp)
 		_ = os.Remove(retryTmp)
@@ -1728,6 +1728,50 @@ func (m *hlsManager) transcodeSegment(ctx context.Context, s *hlsSession, n int,
 		s.evictSegments(m.segmentCacheBytes(s), filename, now)
 	}
 	return p, err
+}
+
+// segmentInspector returns the inspect function transcodeChecked runs on
+// each attempt at segment n (filename) of s: inspectSegment against want,
+// then, for a segment it passes, the size check (HLSConfig.
+// SmallSegmentPercent, see smallSegmentReason). The size check applies only
+// when it is on, the segment should carry video (so never to an audio-only
+// rendition), the session's duration is known, and n is below fullVideoEnd:
+// not the last segment (the only one that may be short) and, when the
+// source's video ends before the media does, wholly before that end. The
+// siblings are the session's cached segments below the same bound when the
+// transcode starts.
+func (m *hlsManager) segmentInspector(s *hlsSession, n int, filename string, sessionDur float64, want segExpect) func(string) (segVerdict, error) {
+	var siblings []int64
+	if pct := m.cfg.SmallSegmentPercent; pct > 0 && want.video && sessionDur > 0 {
+		if end := fullVideoEnd(sessionDur, want.videoEnd); n < end {
+			siblings = s.fullVideoSegmentSizes(filename, end)
+		}
+	}
+	return func(path string) (segVerdict, error) {
+		v, err := inspectSegment(path, want)
+		if err != nil || v.reason != "" || len(siblings) < smallSegMinSiblings {
+			return v, err
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return segVerdict{}, err
+		}
+		v.reason = smallSegmentReason(fi.Size(), siblings, m.cfg.SmallSegmentPercent)
+		return v, nil
+	}
+}
+
+// fullVideoEnd returns the index of the first segment that is not a full
+// segment of video: the last segment of a session of sessionDur seconds,
+// or the first one that reaches past videoEnd (seconds, <= 0 if unknown),
+// whichever comes first. Segments below it are segDur long and carry video
+// throughout.
+func fullVideoEnd(sessionDur, videoEnd float64) int {
+	end := int(math.Ceil(sessionDur/segDur)) - 1
+	if videoEnd > 0 {
+		end = min(end, int(math.Floor(videoEnd/segDur)))
+	}
+	return end
 }
 
 // classifySegmentError marks a failed segment transcode whose cause lies

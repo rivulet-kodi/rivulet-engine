@@ -314,3 +314,33 @@ those reads itself:
 An answer from memory is sniffed at its own offset, as an upstream response
 would be, and every upstream request, continuations included, goes through
 the same client as without the cache.
+
+## Segment checks
+
+`ffmpeg` can exit 0 and still write a broken segment, so each transcoded
+segment is scanned before it is cached. A segment with no video frames,
+video that starts late or ends early, no audio, or an `ffmpeg` input error
+(such as "Stream ends prematurely") is served for that request but not
+cached, so the next request transcodes it again; preparation reports it as
+`u` with the reason.
+
+`RIVULET_HLS_SMALL_SEGMENT_PERCENT` (off by default) adds a size check for a
+segment those checks pass but that came from another object: a host that
+briefly answers the source URL with a placeholder clip gives a segment with
+full-length video at a few percent of its siblings' size (2% in the case
+seen). With it set, a video segment smaller than that percentage of the
+median of the session's other cached full video segments is served but not
+cached, once there are 4 of them.
+
+- **Not judged:** the last segment, audio-only renditions, segments that
+  reach past the end of the source's video, and sessions of unknown
+  duration.
+- **The median** is taken over the segments cached so far; a segment that
+  is not cached never counts. If the source was the placeholder from the
+  start, every segment is small and nothing is flagged.
+- **Still segments.** `libx264` encodes with `-crf` and VAAPI with `-qp`, so
+  a very still segment (a fade to black, a title card) can be a few percent
+  of its siblings too, and any setting can flag it. Such a segment is
+  transcoded again on every request, transcode-ahead and preparation
+  included, and preparation shows it as `u`. `10` catches the placeholder
+  case with the least of that.
