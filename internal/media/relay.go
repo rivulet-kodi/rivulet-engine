@@ -494,12 +494,11 @@ func (r *mediaRelay) proxy(w http.ResponseWriter, req *http.Request, token, upst
 		}
 		record = seen || hit != nil
 	}
-	outReq, client, err := r.upstreamRequest(req.Context(), req.Method, upstream, self, req.Header.Get("Range"))
-	if err != nil {
+	outReq, resp, err := r.fetchUpstream(req, req.Method, token, upstream, self, req.Header.Get("Range"), cacheable, cacheStart, cacheEnd)
+	if errors.Is(err, errRelayBadUpstream) {
 		http.Error(w, "bad upstream url", http.StatusBadGateway)
 		return
 	}
-	resp, err := client.Do(outReq)
 	if err != nil {
 		r.recordFetchError(req, token, err)
 		http.Error(w, "upstream fetch failed", http.StatusBadGateway)

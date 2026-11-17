@@ -307,7 +307,17 @@ those reads itself:
   servers behind the URL disagree. When the difference shows up while
   finishing an answer from memory, that one transfer fails rather than mix
   two files. A source with neither validator is compared on its length
-  alone.
+  alone. The exception is an odd answer: a `206` whose total length alone
+  differs (same `ETag` and `Last-Modified`), or a `416` naming another
+  length for a read that starts at or past it (its validators compared
+  only if it carries them). Some hosts (a debrid service's placeholder for
+  a file it hasn't fetched yet, for one) answer the occasional request for
+  a URL with another object. The read is then sent again, up to twice, and
+  the first answer that isn't odd is used. If every try is odd, the last
+  answer is relayed and compared as above, so a file whose length really
+  changed still turns the cache off, at the latest on the first read that
+  gets a `206` with the new length. The turn-off is logged at `info` with
+  what changed.
 - **Lifetime.** Ranges belong to the relay token, one per upstream URL, so
   sessions of the same URL share them, and go with the token.
 
