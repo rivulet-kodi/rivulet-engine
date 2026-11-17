@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,6 +93,30 @@ func (s *hlsSession) cachedSegments() map[string]int64 {
 	out := make(map[string]int64, len(ix.files))
 	for name, e := range ix.files {
 		out[name] = e.size
+	}
+	return out
+}
+
+// fullVideoSegmentSizes returns the sizes of the session's cached video
+// segments seg<i>.ts with i < last (the caller's fullVideoEnd, so every one
+// is a full segment of video), except skip. Audio renditions
+// (a<k>seg<i>.ts) are not included.
+func (s *hlsSession) fullVideoSegmentSizes(skip string, last int) []int64 {
+	ix := &s.segIdx
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.loadLocked(s.dir)
+	var out []int64
+	for name, e := range ix.files {
+		num, ok := strings.CutPrefix(name, "seg")
+		if !ok || name == skip {
+			continue
+		}
+		i, err := strconv.Atoi(strings.TrimSuffix(num, ".ts"))
+		if err != nil || i < 0 || i >= last {
+			continue
+		}
+		out = append(out, e.size)
 	}
 	return out
 }

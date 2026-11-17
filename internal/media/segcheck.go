@@ -128,6 +128,35 @@ func judgeSegment(got tsCounts, want segExpect) segVerdict {
 	return segVerdict{}
 }
 
+// smallSegMinSiblings is how many of the session's cached full-length video
+// segments the size check needs before it judges one (HLSConfig.
+// SmallSegmentPercent): 16 s of video, so the median is not one scene's.
+const smallSegMinSiblings = 4
+
+// smallSegmentReason returns why a full-length video segment of size bytes
+// must not be cached next to siblings (the sizes of the session's other
+// cached full-length video segments), or "" if it may be: it is smaller than
+// percent% of their median, and there are at least smallSegMinSiblings of
+// them. percent <= 0 turns the check off. For an even count the lower of
+// the two middle sizes is the median, the more lenient choice.
+//
+// ffmpeg writes such a segment, with full-length video and no input error,
+// when the source briefly answers with another, much smaller object (a
+// debrid host's placeholder clip): seen at 2% of its siblings' size.
+func smallSegmentReason(size int64, siblings []int64, percent int) string {
+	if percent <= 0 || len(siblings) < smallSegMinSiblings {
+		return ""
+	}
+	sorted := slices.Clone(siblings)
+	slices.Sort(sorted)
+	median := sorted[(len(sorted)-1)/2]
+	if median <= 0 || size*100 >= median*int64(percent) {
+		return ""
+	}
+	return fmt.Sprintf("segment is %d bytes, under %d%% of the median %d of %d earlier segments",
+		size, percent, median, len(sorted))
+}
+
 // Input-seek pre-rolls, in seconds before the segment start.
 const (
 	// fullPreRoll is the historical margin, used for every container

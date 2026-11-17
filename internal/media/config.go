@@ -134,6 +134,19 @@ type HLSConfig struct {
 	// the rest to whole milliseconds.
 	SeekPreroll time.Duration
 
+	// --- segment checks ---
+	// SmallSegmentPercent serves a transcoded video segment without caching
+	// it when it is smaller than this percentage of the median size of the
+	// session's other cached full-length video segments, once there are
+	// smallSegMinSiblings of them (RIVULET_HLS_SMALL_SEGMENT_PERCENT). It
+	// catches a segment written from a different object than its siblings
+	// (a host that briefly answers the source URL with another file) that
+	// the frame and input-error checks pass. The last segment, audio-only
+	// renditions, segments that reach past the end of the source's video
+	// and sessions of unknown duration are never judged by size. 0, the default, turns it off; normalize caps it at
+	// MaxSmallSegmentPercent. See smallSegmentReason.
+	SmallSegmentPercent int
+
 	// --- network ---
 	// PrivateAllow lists the private hosts (IPs, CIDRs, hostnames) a media
 	// URL may point at: /probe, /tracks and /hlsv2 mediaURL, checked before
@@ -164,6 +177,10 @@ const defaultAheadConcurrency = 1
 // MaxTranscodeAhead caps HLSConfig.TranscodeAhead: 30 segments of 4 s are
 // two minutes, past what a player buffers.
 const MaxTranscodeAhead = 30
+
+// MaxSmallSegmentPercent caps HLSConfig.SmallSegmentPercent: above half the
+// median, the ordinary spread of variable-bitrate segments would be flagged.
+const MaxSmallSegmentPercent = 50
 
 // SeekPrerollNone is the HLSConfig.SeekPreroll value meaning "no pre-roll"
 // (pure input seek). A literal 0 cannot carry that meaning because 0 is the
@@ -342,6 +359,7 @@ func (c HLSConfig) normalize(numCPU int) HLSConfig {
 	if c.AheadConcurrency <= 0 {
 		c.AheadConcurrency = defaultAheadConcurrency
 	}
+	c.SmallSegmentPercent = min(max(c.SmallSegmentPercent, 0), MaxSmallSegmentPercent)
 	if c.SegmentTimeout <= 0 {
 		c.SegmentTimeout = d.SegmentTimeout
 	}
