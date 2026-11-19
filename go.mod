@@ -12,7 +12,7 @@ require (
 	github.com/bodgit/sevenzip v1.6.5
 	github.com/coder/websocket v1.8.15
 	github.com/daku10/go-lz-string v0.0.7
-	github.com/huin/goupnp v1.3.0
+	github.com/huin/goupnp v1.3.1
 	github.com/jlaffaye/ftp v0.2.4
 	github.com/nwaples/rardecode/v2 v2.4.6
 	golang.org/x/net v0.62.0
