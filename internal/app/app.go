@@ -727,6 +727,15 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		logging.For("config").Warn("negative RIVULET_HLS_RELAY_CACHE_BYTES; cache off", "value", relayCacheBytes)
 		relayCacheBytes = 0
 	}
+	smallSegmentPercent := envInt(lookup, "RIVULET_HLS_SMALL_SEGMENT_PERCENT", d.SmallSegmentPercent)
+	switch {
+	case smallSegmentPercent < 0:
+		logging.For("config").Warn("negative RIVULET_HLS_SMALL_SEGMENT_PERCENT; check off", "value", smallSegmentPercent)
+		smallSegmentPercent = 0
+	case smallSegmentPercent > media.MaxSmallSegmentPercent:
+		logging.For("config").Warn("RIVULET_HLS_SMALL_SEGMENT_PERCENT above the maximum; capped", "value", smallSegmentPercent, "max", media.MaxSmallSegmentPercent)
+		smallSegmentPercent = media.MaxSmallSegmentPercent
+	}
 	return media.HLSConfig{
 		SessionTTL:     sessionTTL,
 		ReaperInterval: envDuration(lookup, "RIVULET_HLS_REAPER_INTERVAL", media.DefaultReaperInterval(sessionTTL)),
@@ -772,6 +781,10 @@ func hlsConfig(lookup Lookup) media.HLSConfig {
 		ProbeTimeout:    envDuration(lookup, "RIVULET_HLS_PROBE_TIMEOUT", d.ProbeTimeout),
 
 		SeekPreroll: seekPreroll(lookup, d.SeekPreroll),
+
+		// Serve, don't cache, a video segment far smaller than its siblings
+		// (RIVULET_HLS_SMALL_SEGMENT_PERCENT); 0 = off.
+		SmallSegmentPercent: smallSegmentPercent,
 
 		// Per-session transcoded-segment disk cap: 0 = derived from bitrate,
 		// negative = unlimited (RIVULET_HLS_SEGMENT_CACHE_BYTES).
