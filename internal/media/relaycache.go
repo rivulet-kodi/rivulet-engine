@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rivulet-kodi/rivulet-engine/internal/logging"
 )
 
 // relayCache keeps byte ranges of relayed sources in memory
@@ -40,7 +42,11 @@ import (
 // compared: never a playlist, a manifest, a decoded compressed body or an
 // error status. Each one is compared on its total length, ETag and
 // Last-Modified, and a difference turns the cache off for that token for
-// good: its source changed, or its servers disagree.
+// good: its source changed, or its servers disagree. The exception is an odd
+// answer (see odd): a 206 whose total length alone differs, or a 416 naming
+// another length. The read is sent again (see relayCacheOddRetries), and
+// only a read whose every try is odd has its last answer relayed and
+// compared as usual.
 //
 // The zero value is disabled; setBytes enables it.
 type relayCache struct {
@@ -86,6 +92,17 @@ const relayCacheSeenPerSource = 16
 // upstream request that would only be cancelled.
 const relayCacheContinueDelay = 200 * time.Millisecond
 
+// relayCacheOddRetries is how many times a read is sent again after an odd
+// answer (see odd). Some hosts (a debrid service's placeholder for a file it
+// hasn't fetched yet, for one) answer the occasional request for a URL with
+// another object. Relayed, it ends the segment's input early or feeds it the
+// wrong bytes, and comparing it turned the cache off for a source whose next
+// answer was right again. A source that really changed answers every try
+// with its new length, so its read's last answer is compared as usual: a 206
+// turns the cache off; a 416 (a read past a new, shorter end) is relayed,
+// and the cache turns off at the next read that gets a 206.
+const relayCacheOddRetries = 2
+
 // relayCacheMeta identifies a source's content and holds the headers a hit
 // replays.
 type relayCacheMeta struct {
@@ -98,6 +115,21 @@ type relayCacheMeta struct {
 // sameSource reports whether two responses came from the same content.
 func (m relayCacheMeta) sameSource(o relayCacheMeta) bool {
 	return m.total == o.total && m.etag == o.etag && m.lastMod == o.lastMod
+}
+
+// diff names what differs between two responses' metas, for the log.
+func (m relayCacheMeta) diff(o relayCacheMeta) string {
+	var d []string
+	if m.total != o.total {
+		d = append(d, "total length")
+	}
+	if m.etag != o.etag {
+		d = append(d, "etag")
+	}
+	if m.lastMod != o.lastMod {
+		d = append(d, "last-modified")
+	}
+	return strings.Join(d, ", ")
 }
 
 // relaySpan is one recorded byte range. Its fields never change after
@@ -181,33 +213,87 @@ func (c *relayCache) lookup(token string, start int64) (hit *relaySpan, meta rel
 	return hit, src.meta, record
 }
 
+// odd reports whether resp, an answer to a read of bytes start-end (end -1:
+// open) of token's source, is an odd one, to be sent again rather than
+// relayed: a 206 for exactly that range, or a 416 ("bytes */N"), whose total
+// length differs from the recorded one while its ETag and Last-Modified
+// don't. A 416 carries no representation, and servers often leave its
+// validators out (Go's own file server does): one is compared only if the
+// 416 has it. False while the source has no recorded meta or is off.
+func (c *relayCache) odd(token string, resp *http.Response, start, end int64) bool {
+	var total int64
+	etag, lastMod := resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")
+	partial := resp.StatusCode == http.StatusPartialContent
+	switch {
+	case partial:
+		m, ok := relayCacheMetaOf(resp, start, end)
+		if !ok {
+			return false
+		}
+		total = m.total
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		n, ok := parseUnsatisfiedRange(resp.Header.Get("Content-Range"))
+		if !ok || start < n {
+			return false
+		}
+		total = n
+	default:
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	src := c.sources[token]
+	if src == nil || src.off || src.meta.header == nil || total == src.meta.total {
+		return false
+	}
+	return (etag == src.meta.etag || !partial && etag == "") &&
+		(lastMod == src.meta.lastMod || !partial && lastMod == "")
+}
+
 // observe checks a partial response for token's source against the
 // recorded meta (taking it as the meta if there is none yet). A mismatch
 // turns the source off; observe reports whether the response matched.
 func (c *relayCache) observe(token string, meta relayCacheMeta) bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	src := c.sources[token]
 	switch {
 	case src == nil || src.off:
+		c.mu.Unlock()
 		return true
 	case src.meta.header == nil:
 		src.meta = meta
+		c.mu.Unlock()
 		return true
 	case src.meta.sameSource(meta):
+		c.mu.Unlock()
 		return true
 	}
+	changed := src.meta.diff(meta)
 	c.offLocked(src)
+	c.mu.Unlock()
+	logRelayCacheOff(changed, "upstream read")
 	return false
 }
 
-// invalidate turns token's source off (it changed under a hit).
-func (c *relayCache) invalidate(token string) {
+// invalidate turns token's source off (it changed under a hit); changed
+// says how, for the log.
+func (c *relayCache) invalidate(token, changed string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if src := c.sources[token]; src != nil {
+	src := c.sources[token]
+	turned := src != nil && !src.off
+	if turned {
 		c.offLocked(src)
 	}
+	c.mu.Unlock()
+	if turned {
+		logRelayCacheOff(changed, "answer from memory")
+	}
+}
+
+// logRelayCacheOff notes that the cache turned off for a source: what
+// changed and on which kind of read. Never the URL, token or header values.
+func logRelayCacheOff(changed, on string) {
+	logging.For("media").Info("relay cache off for a source", "changed", changed, "on", on)
 }
 
 // offLocked drops src's recorded ranges and stops caching it. c.mu must be
@@ -366,6 +452,20 @@ func parseContentRange(h string) (start, end, total int64, ok bool) {
 	return start, end, total, true
 }
 
+// parseUnsatisfiedRange parses a 416's "bytes */L" with a known total
+// length L.
+func parseUnsatisfiedRange(h string) (total int64, ok bool) {
+	size, found := strings.CutPrefix(strings.TrimSpace(h), "bytes */")
+	if !found {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(size, 10, 64)
+	if err != nil || total < 0 {
+		return 0, false
+	}
+	return total, true
+}
+
 // rangeLast is the last byte a request for bytes from a start to end (-1:
 // open) gets from a resource of total bytes.
 func rangeLast(total, end int64) int64 {
@@ -515,19 +615,21 @@ func (r *mediaRelay) serveCached(w http.ResponseWriter, req *http.Request, token
 	if end >= 0 {
 		rng += strconv.FormatInt(end, 10)
 	}
-	outReq, client, err := r.upstreamRequest(req.Context(), http.MethodGet, upstream, self, rng)
+	_, resp, err := r.fetchUpstream(req, http.MethodGet, token, upstream, self, rng, true, next, end)
 	if err != nil {
+		if !errors.Is(err, errRelayBadUpstream) {
+			r.recordFetchError(req, token, err)
+		}
 		panic(http.ErrAbortHandler) // headers are out: fail the transfer
-	}
-	resp, err := client.Do(outReq)
-	if err != nil {
-		r.recordFetchError(req, token, err)
-		panic(http.ErrAbortHandler)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	m, ok := relayCacheMetaOf(resp, next, end)
 	if !ok || !m.sameSource(meta) {
-		r.cache.invalidate(token)
+		changed := "not a plain partial response"
+		if ok {
+			changed = meta.diff(m)
+		}
+		r.cache.invalidate(token, changed)
 		if !r.recordStatusFailure(req, token, resp) {
 			r.recordFailure(req, token, "upstream changed while relayed from the cache", false)
 		}
@@ -536,6 +638,34 @@ func (r *mediaRelay) serveCached(w http.ResponseWriter, req *http.Request, token
 	rec := r.cache.newRecorder(token, meta, start, last-start+1, cached)
 	r.copyUpstreamBody(w, req, token, resp.Body, rec)
 	return true
+}
+
+// errRelayBadUpstream is fetchUpstream's error when no request could be
+// built for the upstream URL.
+var errRelayBadUpstream = errors.New("bad upstream url")
+
+// fetchUpstream sends req's method for the Range rng ("" for none) of
+// upstream and returns the request and its response. With check set, while
+// the cache judges the response an odd answer for bytes start-end (end -1:
+// open) of token's source, it closes it unread and asks again, up to
+// relayCacheOddRetries more times; the last answer is returned whatever it
+// is, and is compared and relayed as before.
+func (r *mediaRelay) fetchUpstream(req *http.Request, method, token, upstream, self, rng string, check bool, start, end int64) (*http.Request, *http.Response, error) {
+	for try := 0; ; try++ {
+		outReq, client, err := r.upstreamRequest(req.Context(), method, upstream, self, rng)
+		if err != nil {
+			return nil, nil, errRelayBadUpstream
+		}
+		resp, err := client.Do(outReq)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !check || try == relayCacheOddRetries || !r.cache.odd(token, resp, start, end) {
+			return outReq, resp, nil
+		}
+		_ = resp.Body.Close()
+		logging.For("media").Debug("relay fetching again after an odd upstream answer", "try", try+1)
+	}
 }
 
 // copyUpstreamBody streams body to w. If rec is set (its r is filled in

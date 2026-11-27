@@ -710,3 +710,251 @@ func TestRelayCacheConcurrentReads(t *testing.T) {
 			r.cache.used, sum, r.cache.inflight, r.cache.lru.Len())
 	}
 }
+
+// oddAnswers makes o answer its next requests whose 1-based numbers are
+// listed with odd's body for that number instead of its own: another object
+// behind the same URL and the same validators, as a host's placeholder can
+// be.
+func oddAnswers(o *rangeOrigin, odd map[int][]byte) {
+	var n atomic.Int32
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.serve = func(w http.ResponseWriter, req *http.Request, body []byte) {
+		if other, ok := odd[int(n.Add(1))]; ok {
+			body = other
+		}
+		http.ServeContent(w, req, "", time.Time{}, bytes.NewReader(body))
+	}
+}
+
+// otherBody returns n bytes that look like media but differ from
+// mediaBody's at every offset past the magic.
+func otherBody(n int, salt byte) []byte {
+	b := mediaBody(n)
+	for i := 4; i < n; i++ {
+		b[i] ^= salt
+	}
+	return b
+}
+
+// An answer whose total length alone differs is fetched again instead of
+// relayed, and the cache stays on.
+func TestRelayCacheRefetchesAnOddAnswer(t *testing.T) {
+	src := mediaBody(200 << 10)
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 64<<20)
+	recordFirst32K(t, u, src)
+	oddAnswers(o, map[int][]byte{1: otherBody(210<<10, 1)})
+
+	mustCacheGet(t, u, "bytes=50000-", src[50000:])
+	if reqs := o.requests(); len(reqs) != 4 || reqs[2] != "bytes=50000-" || reqs[3] != "bytes=50000-" {
+		t.Fatalf("upstream requests = %q, want the odd answer's read sent twice", reqs)
+	}
+	mustCacheGet(t, u, "bytes=0-32767", src[:32768])
+	if n := len(o.requests()); n != 4 {
+		t.Errorf("upstream requests = %d, want 4 (the cache still on)", n)
+	}
+}
+
+// The same holds for the bytes fetched past a recorded range: the transfer
+// goes on with the right bytes.
+func TestRelayCacheRefetchesAnOddAnswerUnderAHit(t *testing.T) {
+	src := mediaBody(200 << 10)
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 64<<20)
+	recordFirst32K(t, u, src)
+	oddAnswers(o, map[int][]byte{1: otherBody(190<<10, 1)})
+
+	mustCacheGet(t, u, "bytes=0-", src)
+	if reqs := o.requests(); len(reqs) != 4 || reqs[2] != "bytes=32768-" || reqs[3] != "bytes=32768-" {
+		t.Fatalf("upstream requests = %q, want the continuation sent twice", reqs)
+	}
+	mustCacheGet(t, u, "bytes=0-32767", src[:32768])
+	if n := len(o.requests()); n != 4 {
+		t.Errorf("upstream requests = %d, want 4 (the cache still on)", n)
+	}
+}
+
+// A source whose length really changed answers every try with it: the
+// last answer is relayed and the cache turns off, as for any other
+// difference.
+func TestRelayCacheTurnsOffForALengthThatStays(t *testing.T) {
+	src := mediaBody(200 << 10)
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 64<<20)
+	recordFirst32K(t, u, src)
+	newSrc := otherBody(220<<10, 1)
+	o.replace(newSrc, `"v1"`)
+
+	mustCacheGet(t, u, "bytes=50000-", newSrc[50000:])
+	if n := len(o.requests()); n != 3+relayCacheOddRetries {
+		t.Fatalf("upstream requests = %d (%q), want %d", n, o.requests(), 3+relayCacheOddRetries)
+	}
+	mustCacheGet(t, u, "bytes=0-32767", newSrc[:32768])
+	if n := len(o.requests()); n != 4+relayCacheOddRetries {
+		t.Errorf("upstream requests = %d, want the recorded range dropped", n)
+	}
+}
+
+// Under a hit, a changed length still fails the transfer rather than mix
+// two files, once every try has seen it.
+func TestRelayCacheTurnsOffForALengthThatStaysUnderAHit(t *testing.T) {
+	src := mediaBody(200 << 10)
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 64<<20)
+	recordFirst32K(t, u, src)
+	newSrc := otherBody(220<<10, 1)
+	o.replace(newSrc, `"v1"`)
+
+	if resp, body, err := cacheGet(t, u, "bytes=0-"); err == nil {
+		t.Fatalf("GET after the length changed: %d, %d bytes and no error; want an aborted transfer", resp.StatusCode, len(body))
+	}
+	if n := len(o.requests()); n != 3+relayCacheOddRetries {
+		t.Fatalf("upstream requests = %d (%q), want %d", n, o.requests(), 3+relayCacheOddRetries)
+	}
+	mustCacheGet(t, u, "bytes=0-32767", newSrc[:32768])
+	if n := len(o.requests()); n != 4+relayCacheOddRetries {
+		t.Errorf("upstream requests = %d, want the cache off", n)
+	}
+}
+
+// With the cache off (the default) nothing is judged: an odd answer is
+// relayed as it comes, from one upstream request.
+func TestRelayCacheOffRelaysAnOddAnswer(t *testing.T) {
+	src := mediaBody(200 << 10)
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 0)
+	mustCacheGet(t, u, "bytes=0-32767", src[:32768])
+	other := otherBody(210<<10, 1)
+	oddAnswers(o, map[int][]byte{1: other})
+	mustCacheGet(t, u, "bytes=50000-", other[50000:])
+	if n := len(o.requests()); n != 2 {
+		t.Errorf("upstream requests = %d (%q), want 2", n, o.requests())
+	}
+}
+
+// A closed range is sent again with the same bounds.
+func TestRelayCacheRefetchesAnOddAnswerToAClosedRange(t *testing.T) {
+	src := mediaBody(200 << 10)
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 64<<20)
+	recordFirst32K(t, u, src)
+	oddAnswers(o, map[int][]byte{1: otherBody(210<<10, 1)})
+	mustCacheGet(t, u, "bytes=50000-59999", src[50000:60000])
+	if reqs := o.requests(); len(reqs) != 4 || reqs[2] != "bytes=50000-59999" || reqs[3] != "bytes=50000-59999" {
+		t.Errorf("upstream requests = %q, want the closed range sent twice", reqs)
+	}
+}
+
+// A shorter object answers a read past its end with a 416 naming its own
+// length: that is an odd answer too, on a miss and under a hit.
+func TestRelayCacheRefetchesAnOdd416(t *testing.T) {
+	src := mediaBody(200 << 10)
+	short := otherBody(100<<10, 1)
+
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 64<<20)
+	recordFirst32K(t, u, src)
+	oddAnswers(o, map[int][]byte{1: short})
+	mustCacheGet(t, u, "bytes=150000-", src[150000:])
+	if n := len(o.requests()); n != 4 {
+		t.Errorf("miss: upstream requests = %d (%q), want 4", n, o.requests())
+	}
+
+	o = newRangeOrigin(t, src)
+	_, u = cachedRelay(t, o, 64<<20)
+	mustCacheGet(t, u, "bytes=150000-169999", src[150000:170000])
+	mustCacheGet(t, u, "bytes=150000-169999", src[150000:170000]) // recorded
+	oddAnswers(o, map[int][]byte{1: short})
+	mustCacheGet(t, u, "bytes=150000-", src[150000:])
+	if reqs := o.requests(); len(reqs) != 4 || reqs[2] != "bytes=170000-" || reqs[3] != "bytes=170000-" {
+		t.Errorf("under a hit: upstream requests = %q, want the continuation sent twice", reqs)
+	}
+}
+
+func TestRelayCacheOdd(t *testing.T) {
+	answer := func(status int, h ...string) *http.Response {
+		resp := &http.Response{StatusCode: status, Header: http.Header{}}
+		for i := 0; i+1 < len(h); i += 2 {
+			resp.Header.Set(h[i], h[i+1])
+		}
+		return resp
+	}
+	var c relayCache
+	c.setBytes(1 << 20)
+	c.addToken("a")
+	if c.odd("a", answer(http.StatusPartialContent, "Content-Range", "bytes 0-9/120"), 0, 9) {
+		t.Fatal("odd before the source has a meta: true, want false")
+	}
+	c.observe("a", relayCacheMeta{total: 100, etag: `"v1"`, header: http.Header{}})
+	for _, tc := range []struct {
+		name       string
+		resp       *http.Response
+		start, end int64
+		want       bool
+	}{
+		{"same length", answer(206, "Content-Range", "bytes 0-9/100", "ETag", `"v1"`), 0, 9, false},
+		{"longer", answer(206, "Content-Range", "bytes 0-9/120", "ETag", `"v1"`), 0, 9, true},
+		{"shorter, open range", answer(206, "Content-Range", "bytes 10-79/80", "ETag", `"v1"`), 10, -1, true},
+		{"another etag", answer(206, "Content-Range", "bytes 0-9/120", "ETag", `"v2"`), 0, 9, false},
+		{"a last-modified", answer(206, "Content-Range", "bytes 0-9/120", "ETag", `"v1"`, "Last-Modified", "x"), 0, 9, false},
+		{"not the range asked", answer(206, "Content-Range", "bytes 0-4/120", "ETag", `"v1"`), 0, 9, false},
+		{"416 past a shorter end", answer(416, "Content-Range", "bytes */80", "ETag", `"v1"`), 90, -1, true},
+		{"416 for the same length", answer(416, "Content-Range", "bytes */100", "ETag", `"v1"`), 150, -1, false},
+		{"416 inside its own length", answer(416, "Content-Range", "bytes */80", "ETag", `"v1"`), 50, -1, false},
+		{"416 without a length", answer(416, "ETag", `"v1"`), 90, -1, false},
+		{"416 without validators", answer(416, "Content-Range", "bytes */80"), 90, -1, true},
+		{"416 with another etag", answer(416, "Content-Range", "bytes */80", "ETag", `"v2"`), 90, -1, false},
+		{"206 without the etag", answer(206, "Content-Range", "bytes 0-9/120"), 0, 9, false},
+		{"200", answer(200, "ETag", `"v1"`), 0, 9, false},
+		{"503", answer(503), 0, 9, false},
+	} {
+		if got := c.odd("a", tc.resp, tc.start, tc.end); got != tc.want {
+			t.Errorf("%s: odd = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	c.invalidate("a", "test")
+	if c.odd("a", answer(206, "Content-Range", "bytes 0-9/120", "ETag", `"v1"`), 0, 9) {
+		t.Error("odd for a source turned off: true, want false")
+	}
+}
+
+func TestParseUnsatisfiedRange(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		total int64
+		ok    bool
+	}{
+		{"bytes */100", 100, true},
+		{" bytes */0", 0, true},
+		{"bytes */*", 0, false},
+		{"bytes 0-9/100", 0, false},
+		{"bytes */-1", 0, false},
+		{"", 0, false},
+	} {
+		total, ok := parseUnsatisfiedRange(tc.in)
+		if total != tc.total || ok != tc.ok {
+			t.Errorf("parseUnsatisfiedRange(%q) = %d, %v; want %d, %v", tc.in, total, ok, tc.total, tc.ok)
+		}
+	}
+}
+
+// A read is fetched again at most relayCacheOddRetries times; the last
+// answer is then compared as before, and the cache turns off.
+func TestRelayCacheStopsFetchingAgain(t *testing.T) {
+	src := mediaBody(200 << 10)
+	o := newRangeOrigin(t, src)
+	_, u := cachedRelay(t, o, 64<<20)
+	recordFirst32K(t, u, src)
+	last := otherBody(230<<10, 3)
+	oddAnswers(o, map[int][]byte{1: otherBody(210<<10, 1), 2: otherBody(220<<10, 2), 3: last})
+
+	mustCacheGet(t, u, "bytes=50000-", last[50000:])
+	if n := len(o.requests()); n != 2+1+relayCacheOddRetries {
+		t.Fatalf("upstream requests = %d (%q), want %d", n, o.requests(), 2+1+relayCacheOddRetries)
+	}
+	mustCacheGet(t, u, "bytes=0-32767", src[:32768])
+	if n := len(o.requests()); n != 3+1+relayCacheOddRetries {
+		t.Errorf("upstream requests = %d, want the cache off", n)
+	}
+}
